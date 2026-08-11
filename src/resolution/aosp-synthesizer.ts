@@ -390,8 +390,19 @@ export const selinuxBindingSynthesizer: GraphSynthesizer = {
     for (const policy of contexts) {
       const serviceMatches = services.filter((n) => n.name === policy.name || n.qualifiedName === policy.name || n.qualifiedName.endsWith(`:${policy.name}`));
       for (const service of serviceMatches) out.push(edge(policy, service, 'configures', this.id, [`context ${policy.signature ?? ''}`, policy.filePath], 'exact'));
-      const propertyMatches = properties.filter((n) => n.qualifiedName === policy.name || n.qualifiedName.startsWith(policy.name.replace(/\*$/, '')));
-      for (const property of propertyMatches) out.push(edge(policy, property, 'configures', this.id, [`property context ${policy.name}`, policy.filePath], policy.name.includes('*') ? 'strong' : 'exact'));
+      // `*  u:object_r:default_prop:s0` is the catch-all LAST line of a
+      // *_contexts file: it states what governs everything no more specific
+      // rule claimed, so it is evidence about no particular property. Stripping
+      // its `*` leaves '', and startsWith('') matched every property in the
+      // index — 70% of this synthesizer's edges on a real AOSP subtree.
+      const prefix = policy.name.replace(/\*$/, '');
+      if (!prefix) continue;
+      const propertyMatches = properties.filter((n) => n.qualifiedName === policy.name || n.qualifiedName.startsWith(prefix));
+      for (const property of propertyMatches) {
+        // Only a whole-name equality is exact; a prefix rule governs a family.
+        const exact = property.qualifiedName === policy.name;
+        out.push(edge(policy, property, 'configures', this.id, [`property context ${policy.name}`, policy.filePath], exact ? 'exact' : 'strong'));
+      }
     }
     return uniqueEdges(out);
   },

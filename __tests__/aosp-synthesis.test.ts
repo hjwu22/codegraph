@@ -186,6 +186,27 @@ describe('AOSP cross-language synthesis', () => {
     ]));
   });
 
+  it('ignores the catch-all *_contexts entry and grades prefix rules honestly', () => {
+    // Real AOSP shape: every *_contexts file ends with `*  u:object_r:default_prop:s0`,
+    // the fallback for whatever no more specific rule claimed. Stripping its `*`
+    // leaves '', and startsWith('') used to match every property in the index —
+    // 1,512 of 2,157 edges (70%) on a real AOSP subtree.
+    const catchAll = node('all', 'resource', '*', '*', 'property_contexts', 'selinux', 'u:object_r:default_prop:s0');
+    const prefixRule = node('vp', 'resource', 'vendor.', 'vendor.', 'property_contexts', 'selinux', 'u:object_r:vendor_prop:s0');
+    const exactRule = node('ep', 'resource', 'persist.demo.enabled', 'persist.demo.enabled', 'property_contexts', 'selinux', 'u:object_r:demo_prop:s0');
+    const vendorProp = node('vprop', 'property', 'count', 'vendor.demo.count', 'demo.sysprop', 'sysprop');
+    const exactProp = node('eprop', 'property', 'enabled', 'persist.demo.enabled', 'demo.sysprop', 'sysprop');
+    const edges = selinuxBindingSynthesizer.synthesize(context(
+      [catchAll, prefixRule, exactRule, vendorProp, exactProp],
+      { property_contexts: '', 'demo.sysprop': '' },
+    ));
+    expect(edges.filter((e) => e.source === 'all')).toEqual([]);
+    expect(edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'vp', target: 'vprop', metadata: expect.objectContaining({ confidence: 'strong' }) }),
+      expect.objectContaining({ source: 'ep', target: 'eprop', metadata: expect.objectContaining({ confidence: 'exact' }) }),
+    ]));
+  });
+
   it('keeps protocol bridges silent when their exact evidence does not match', () => {
     const iface = node('iface', 'interface', 'IFoo', 'android.foo.IFoo', 'IFoo.aidl', 'aidl');
     const unrelatedImpl = node('impl', 'class', 'FooImpl', 'android.foo.FooImpl', 'FooImpl.java', 'java');
