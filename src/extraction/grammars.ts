@@ -392,7 +392,11 @@ function expandGrammarLanguages(languages: Language[]): Language[] {
   if (languages.some((l) => l === 'cfml')) {
     languages = [...languages, 'cfscript', 'cfquery'];
   }
-  return languages;
+  // Dedicated AOSP scanners run before the tree-sitter route. Starlark and
+  // Device Tree keep pinned WASMs for explicit grammar health/provenance checks,
+  // but production indexing must not read, broadcast, or instantiate parsers it
+  // will never call in each worker.
+  return languages.filter((language) => !AOSP_CUSTOM_LANGUAGES.has(language));
 }
 
 /**
@@ -575,7 +579,7 @@ export function isLanguageSupported(language: Language): boolean {
  * Check if a grammar has been loaded and is ready for parsing.
  */
 export function isGrammarLoaded(language: Language): boolean {
-  if (AOSP_CUSTOM_LANGUAGES.has(language) && language !== 'starlark' && language !== 'devicetree') return true;
+  if (AOSP_CUSTOM_LANGUAGES.has(language)) return true;
   if (language === 'svelte' || language === 'vue' || language === 'astro' || language === 'liquid' || language === 'razor') return true;
   if (language === 'yaml' || language === 'twig') return true; // no WASM grammar needed
   if (language === 'xml' || language === 'properties') return true; // no WASM grammar needed

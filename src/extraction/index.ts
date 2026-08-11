@@ -238,15 +238,15 @@ function defaultIgnorePatterns(rootDir?: string): string[] {
   if (!rootDir) return DEFAULT_IGNORE_PATTERNS;
   const config = loadAospProjectConfig(rootDir);
   const profileEnabled = config.enabled === true || (config.enabled === 'auto' && isAospWorkspace(rootDir));
-  if (!profileEnabled || !config.indexAndroidResources) {
-    return DEFAULT_IGNORE_PATTERNS;
-  }
-  // Full AOSP workspaces opt into the specialized Android XML extractor. Keep
-  // generated output/cache exclusions, but restore the root build/ and vendor/
-  // source trees (nested third-party build/vendor directories stay excluded).
+  if (!profileEnabled) return DEFAULT_IGNORE_PATTERNS;
+
+  // Build/vendor source ownership and Android resource XML are independent
+  // profile choices. AOSP roots always restore their root build/ and vendor/
+  // trees; indexAndroidResources only controls the res/* exclusions.
   const resourcePatterns = new Set(ANDROID_RESOURCE_IGNORE_PATTERNS);
   return [
-    ...DEFAULT_IGNORE_PATTERNS.filter((pattern) => !resourcePatterns.has(pattern)),
+    ...DEFAULT_IGNORE_PATTERNS.filter((pattern) =>
+      !config.indexAndroidResources || !resourcePatterns.has(pattern)),
     '!/build/',
     '!/vendor/',
   ];

@@ -6,9 +6,12 @@ import { generateNodeId } from './tree-sitter-helpers';
 export function isAndroidSemanticXml(filePath: string, source: string): boolean {
   const normalized = filePath.replace(/\\/g, '/');
   const base = path.posix.basename(filePath.replace(/\\/g, '/'));
-  if (base === 'AndroidManifest.xml' || base === 'resourcesMap.xml') return true;
+  if (base === 'AndroidManifest.xml' || base === 'resourcesMap.xml' || /^AndroidTest(?:Template)?\.xml$/i.test(base)) return true;
   if (/\/res\/(?:anim|animator|color|drawable|font|layout|menu|mipmap|navigation|transition|values|xml)(?:-[^/]+)?\//.test(normalized)) return true;
-  return /<resources(?:\s|>)|<(?:compatibility-matrix|manifest)\b[^>]*\btype\s*=|<overlayable(?:\s|>)|<configuration(?:\s|>)/.test(source);
+  // VINTF roots have an Android-specific type attribute. Do not route generic
+  // XML merely because it contains <resources> or <configuration>: Maven POMs
+  // commonly contain both and must stay on the ordinary XML path.
+  return /<(?:compatibility-matrix|manifest)\b[^>]*\btype\s*=/.test(source);
 }
 
 /**
@@ -22,11 +25,15 @@ export class AndroidXmlExtractor {
   private readonly unresolvedReferences: UnresolvedReference[] = [];
   private readonly errors: ExtractionError[] = [];
   private readonly lines: string[];
+  private readonly lineStarts: number[] = [0];
   private readonly now = Date.now();
   private fileNode!: Node;
 
   constructor(private readonly filePath: string, private readonly source: string) {
     this.lines = source.split(/\r?\n/);
+    for (let i = 0; i < source.length; i++) {
+      if (source.charCodeAt(i) === 10) this.lineStarts.push(i + 1);
+    }
   }
 
   extract(): ExtractionResult {
@@ -56,9 +63,19 @@ export class AndroidXmlExtractor {
     return node;
   }
 
-  private lineAt(offset: number): number { return this.source.slice(0, offset).split('\n').length; }
+  private lineAt(offset: number): number {
+    let lo = 0;
+    let hi = this.lineStarts.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (this.lineStarts[mid]! <= Math.max(0, offset)) lo = mid + 1;
+      else hi = mid;
+    }
+    return Math.max(1, lo);
+  }
   private attr(attrs: string, name: string): string | undefined {
-    return new RegExp(`(?:android:)?${name}\\s*=\\s*["']([^"']+)["']`).exec(attrs)?.[1];
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(?:^|\\s)(?:[A-Za-z_][\\w.-]*:)?${escaped}\\s*=\\s*["']([^"']+)["']`).exec(attrs)?.[1];
   }
   private ref(from: Node, name: string, kind: ReferenceKind, line: number): void {
     if (!name) return;
@@ -138,6 +155,7 @@ export class AndroidXmlExtractor {
     const root = this.addNode('module', type?.[1] ?? 'vintf', `vintf:${this.filePath}`, type ? this.lineAt(type.index) : 1, type ? this.lineAt(type.index) : 1, type?.[1]);
     for (const hal of this.source.matchAll(/<hal\b([^>]*)>([\s\S]*?)<\/hal>/g)) {
       const body = hal[2]!;
+      const bodyOffset = hal.index! + hal[0].indexOf(body);
       const format = this.attr(hal[1]!, 'format') ?? 'hidl';
       const name = /<name>\s*([^<]+)\s*<\/name>/.exec(body)?.[1]?.trim();
       if (!name) continue;
@@ -145,9 +163,9 @@ export class AndroidXmlExtractor {
       const transport = /<transport>\s*([^<]+)\s*<\/transport>/.exec(body)?.[1]?.trim();
       const service = this.addNode('service', name, `vintf:${name}${version ? `@${version}` : ''}`, this.lineAt(hal.index!), this.lineAt(hal.index! + hal[0].length),
         `${format}${version ? ` @${version}` : ''}${transport ? ` transport=${transport}` : ''}`, root);
-      for (const fq of body.matchAll(/<fqname>\s*([^<]+)\s*<\/fqname>/g)) this.ref(service, fq[1]!.trim(), 'binds', this.lineAt(hal.index! + fq.index!));
+      for (const fq of body.matchAll(/<fqname>\s*([^<]+)\s*<\/fqname>/g)) this.ref(service, fq[1]!.trim(), 'binds', this.lineAt(bodyOffset + fq.index!));
       for (const iface of body.matchAll(/<interface>[\s\S]*?<name>\s*([^<]+)\s*<\/name>[\s\S]*?<instance>\s*([^<]+)\s*<\/instance>[\s\S]*?<\/interface>/g)) {
-        const instance = this.addNode('service', iface[2]!.trim(), `${name}::${iface[1]!.trim()}/${iface[2]!.trim()}`, this.lineAt(hal.index! + iface.index!), this.lineAt(hal.index! + iface.index!), `VINTF ${format} instance`, service);
+        const instance = this.addNode('service', iface[2]!.trim(), `${name}::${iface[1]!.trim()}/${iface[2]!.trim()}`, this.lineAt(bodyOffset + iface.index!), this.lineAt(bodyOffset + iface.index!), `VINTF ${format} instance`, service);
         this.ref(instance, iface[1]!.trim(), 'binds', instance.startLine);
       }
     }

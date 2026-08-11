@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS unresolved_refs (
     line INTEGER NOT NULL,
     col INTEGER NOT NULL,
     candidates TEXT, -- JSON array
+    metadata TEXT, -- JSON object with extractor evidence/variant context
     file_path TEXT NOT NULL DEFAULT '',
     language TEXT NOT NULL DEFAULT 'unknown',
     status TEXT NOT NULL DEFAULT 'pending',

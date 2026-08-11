@@ -114,6 +114,7 @@ interface UnresolvedRefRow {
   line: number;
   col: number;
   candidates: string | null;
+  metadata: string | null;
   file_path: string;
   language: string;
   status: string;
@@ -2131,8 +2132,8 @@ export class QueryBuilder {
   insertUnresolvedRef(ref: UnresolvedReference): void {
     if (!this.stmts.insertUnresolved) {
       this.stmts.insertUnresolved = this.db.prepare(`
-        INSERT INTO unresolved_refs (from_node_id, reference_name, reference_kind, line, col, candidates, file_path, language)
-        VALUES (@fromNodeId, @referenceName, @referenceKind, @line, @col, @candidates, @filePath, @language)
+        INSERT INTO unresolved_refs (from_node_id, reference_name, reference_kind, line, col, candidates, metadata, file_path, language)
+        VALUES (@fromNodeId, @referenceName, @referenceKind, @line, @col, @candidates, @metadata, @filePath, @language)
       `);
     }
 
@@ -2143,6 +2144,7 @@ export class QueryBuilder {
       line: ref.line,
       col: ref.column,
       candidates: ref.candidates ? JSON.stringify(ref.candidates) : null,
+      metadata: ref.metadata ? JSON.stringify(ref.metadata) : null,
       filePath: ref.filePath ?? '',
       language: ref.language ?? 'unknown',
     });
@@ -2163,14 +2165,15 @@ export class QueryBuilder {
           ref.line,
           ref.column,
           ref.candidates ? JSON.stringify(ref.candidates) : null,
+          ref.metadata ? JSON.stringify(ref.metadata) : null,
           ref.filePath ?? '',
           ref.language ?? 'unknown',
         ]);
       }
       this.runBatched(
         'insertUnresolvedRefs',
-        'INSERT INTO unresolved_refs (from_node_id, reference_name, reference_kind, line, col, candidates, file_path, language) VALUES ',
-        '(?,?,?,?,?,?,?,?)',
+        'INSERT INTO unresolved_refs (from_node_id, reference_name, reference_kind, line, col, candidates, metadata, file_path, language) VALUES ',
+        '(?,?,?,?,?,?,?,?,?)',
         rows
       );
     });
@@ -2206,6 +2209,7 @@ export class QueryBuilder {
       line: row.line,
       column: row.col,
       candidates: row.candidates ? safeJsonParse(row.candidates, undefined) : undefined,
+      metadata: row.metadata ? safeJsonParse(row.metadata, undefined) : undefined,
       filePath: row.file_path,
       language: row.language as Language,
       rowId: row.id,
@@ -2224,6 +2228,7 @@ export class QueryBuilder {
       line: row.line,
       column: row.col,
       candidates: row.candidates ? safeJsonParse(row.candidates, undefined) : undefined,
+      metadata: row.metadata ? safeJsonParse(row.metadata, undefined) : undefined,
       filePath: row.file_path,
       language: row.language as Language,
       rowId: row.id,
@@ -2272,6 +2277,7 @@ export class QueryBuilder {
       line: row.line,
       column: row.col,
       candidates: row.candidates ? safeJsonParse(row.candidates, undefined) : undefined,
+      metadata: row.metadata ? safeJsonParse(row.metadata, undefined) : undefined,
       filePath: row.file_path,
       language: row.language as Language,
       rowId: row.id,
@@ -2300,6 +2306,7 @@ export class QueryBuilder {
       line: row.line,
       column: row.col,
       candidates: row.candidates ? safeJsonParse(row.candidates, undefined) : undefined,
+      metadata: row.metadata ? safeJsonParse(row.metadata, undefined) : undefined,
       filePath: row.file_path,
       language: row.language as Language,
       rowId: row.id,
@@ -2369,6 +2376,7 @@ export class QueryBuilder {
       line: row.line,
       column: row.col,
       candidates: row.candidates ? safeJsonParse(row.candidates, undefined) : undefined,
+      metadata: row.metadata ? safeJsonParse(row.metadata, undefined) : undefined,
       filePath: row.file_path,
       language: row.language as Language,
       rowId: row.id,
@@ -2551,6 +2559,7 @@ export class QueryBuilder {
       line: row.line,
       column: row.col,
       candidates: row.candidates ? safeJsonParse(row.candidates, undefined) : undefined,
+      metadata: row.metadata ? safeJsonParse(row.metadata, undefined) : undefined,
       filePath: row.file_path,
       language: row.language as Language,
       rowId: row.id,

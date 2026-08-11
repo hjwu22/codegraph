@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { detectLanguage, getSupportedLanguages, initGrammars, isGrammarLoaded, isLanguageSupported, isSourceFile, loadGrammarsForLanguages } from '../src/extraction/grammars';
+import { detectLanguage, getSupportedLanguages, initGrammars, isGrammarLoaded, isLanguageSupported, isSourceFile, loadGrammarsForLanguages, readGrammarWasmBytes } from '../src/extraction/grammars';
 import { isAospWorkspace } from '../src/extraction/aosp-artifacts';
 import { EDGE_KINDS, NODE_KINDS } from '../src/types';
 import { isTestFile } from '../src/search/query-utils';
@@ -42,9 +42,12 @@ describe('AOSP artifact discovery', () => {
     expect(detectLanguage('notes/README')).toBe('unknown');
   });
 
-  it('loads the pinned Starlark and Device Tree WASM grammars', async () => {
+  it('keeps health-check WASMs out of production worker grammar loading', async () => {
     await initGrammars();
+    expect(await readGrammarWasmBytes(['starlark', 'devicetree'])).toEqual({});
     await loadGrammarsForLanguages(['starlark', 'devicetree']);
+    // Custom-extractor readiness remains true without instantiating an unused
+    // parser in every worker.
     expect(isGrammarLoaded('starlark')).toBe(true);
     expect(isGrammarLoaded('devicetree')).toBe(true);
   });

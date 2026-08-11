@@ -178,6 +178,11 @@ This is one half of closing dynamic-dispatch coverage. The other artifacts on `m
 - **Named attribute/descriptor resolver**: `claimsReference` (`resolution/types.ts`,
   pre-filter in `resolution/index.ts`) + django ORM resolver (`frameworks/python.ts`,
   `_iterable_class` → `ModelIterable.__iter__`).
+- **AOSP protocol bridges** are a sibling whole-graph mechanism, not callback
+  inference: `aosp-synthesizer.ts` requires protocol-specific evidence for JNI,
+  Binder, Device Tree, init, VINTF, and SELinux edges. Their deterministic and
+  pending agent-level validation is tracked in the AOSP row of the dynamic-
+  dispatch coverage matrix rather than being folded into callback metrics.
 - **Retrieval/UX changes** (separate from coverage): `explore` whole-small-file + glue
   fixes, the `explore` Flow section (`buildFlowFromNamedSymbols`), and `node`-with-trail
   — all in `src/mcp/tools.ts`. (`codegraph_trace` / `codegraph_context` were later

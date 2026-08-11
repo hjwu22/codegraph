@@ -234,22 +234,52 @@ export const aidlBinderSynthesizer: GraphSynthesizer = {
     const methods = nodesOf(context, 'method');
     const out: Edge[] = [];
 
+    const typesByName = new Map<string, Node[]>();
+    const typesByDeclaredBinding = new Map<string, Node[]>();
+    for (const type of types) {
+      typesByName.set(type.name, [...(typesByName.get(type.name) ?? []), type]);
+      const declaration = sourceLine(context, type);
+      if (!/(?:\bimplements\b|\bextends\b|(?<!:):(?!:))/.test(declaration)) continue;
+      const clauses = [
+        ...[...declaration.matchAll(/\b(?:implements|extends)\s+([^\{]+)/g)].map((match) => match[1]!),
+        ...[...declaration.matchAll(/(?<!:):(?!:)\s*([^={]+)/g)].map((match) => match[1]!),
+      ];
+      for (const clause of clauses) {
+        for (const token of clause.matchAll(/[A-Za-z_]\w*(?:(?:::|\.)[A-Za-z_]\w*)*/g)) {
+          const bare = token[0].split(/::|\./).pop()!;
+          typesByDeclaredBinding.set(bare, [...(typesByDeclaredBinding.get(bare) ?? []), type]);
+        }
+      }
+    }
+
+    const aidlMethodsByOwner = new Map<string, Node[]>();
+    const implementationMethodsByName = new Map<string, Node[]>();
+    for (const method of methods) {
+      if (method.language === 'aidl') {
+        const owner = method.qualifiedName.slice(0, method.qualifiedName.lastIndexOf('::'));
+        aidlMethodsByOwner.set(owner, [...(aidlMethodsByOwner.get(owner) ?? []), method]);
+      } else {
+        implementationMethodsByName.set(method.name, [...(implementationMethodsByName.get(method.name) ?? []), method]);
+      }
+    }
+
     for (const iface of interfaces) {
       const base = iface.name.startsWith('I') ? iface.name.slice(1) : iface.name;
-      const generatedNames = new Set([iface.name, `Bn${base}`, `Bp${base}`, `${iface.name}Stub`, `${base}Stub`, `${base}Service`]);
-      const boundTypes = types.filter((n) => {
-        if (generatedNames.has(n.name)) return true;
-        const source = sourceLine(context, n);
-        return source.includes(iface.name) && /(?:implements|extends|:)/.test(source);
-      });
+      const generatedNames = [iface.name, `Bn${base}`, `Bp${base}`, `${iface.name}Stub`, `${base}Stub`, `${base}Service`];
+      const boundTypes = [...new Map([
+        ...generatedNames.flatMap((name) => typesByName.get(name) ?? []),
+        ...(typesByDeclaredBinding.get(iface.name) ?? []),
+      ].map((type) => [type.id, type])).values()];
       for (const target of boundTypes) {
         if (target.id === iface.id) continue;
         out.push(edge(iface, target, 'binds', this.id, [`AIDL interface ${iface.qualifiedName}`, `binding type ${target.name}`], 'strong'));
       }
 
-      const aidlMethods = methods.filter((n) => n.language === 'aidl' && n.qualifiedName.startsWith(`${iface.qualifiedName}::`));
+      const aidlMethods = aidlMethodsByOwner.get(iface.qualifiedName) ?? [];
+      const boundOwnerPrefixes = [...new Set(boundTypes.map((type) => `${type.qualifiedName}::`))];
       for (const method of aidlMethods) {
-        const candidates = methods.filter((n) => n.language !== 'aidl' && n.name === method.name && boundTypes.some((t) => n.qualifiedName.startsWith(`${t.qualifiedName}::`)));
+        const candidates = (implementationMethodsByName.get(method.name) ?? [])
+          .filter((candidate) => boundOwnerPrefixes.some((prefix) => candidate.qualifiedName.startsWith(prefix)));
         for (const target of candidates) {
           out.push(edge(method, target, 'binds', this.id, [`AIDL method ${method.signature ?? method.name}`, `binding owner ${target.qualifiedName}`], 'strong'));
         }

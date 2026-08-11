@@ -13,6 +13,8 @@ import {
 } from '../src/aosp/build-graph';
 import { clearProjectConfigCache, loadAospProjectConfig } from '../src/project-config';
 import CodeGraph from '../src/index';
+import { DatabaseConnection } from '../src/db';
+import { QueryBuilder } from '../src/db/queries';
 
 const temporary: string[] = [];
 function tempDir(): string {
@@ -27,6 +29,30 @@ afterEach(() => {
 });
 
 describe('AOSP build graph', () => {
+  it('persists conditional unresolved-reference metadata through the database batch path', () => {
+    const dir = tempDir();
+    const connection = DatabaseConnection.initialize(path.join(dir, 'metadata.db'));
+    try {
+      const queries = new QueryBuilder(connection.getDb());
+      queries.insertNode({
+        id: 'target', kind: 'build_target', name: 'kernel', qualifiedName: '//kernel:kernel',
+        filePath: 'kernel/BUILD.bazel', language: 'starlark', startLine: 1, endLine: 1,
+        startColumn: 0, endColumn: 0, updatedAt: Date.now(),
+      });
+      queries.insertUnresolvedRefsBatch([{
+        fromNodeId: 'target', referenceName: '//common:arm64', referenceKind: 'depends_on',
+        line: 4, column: 0, filePath: 'kernel/BUILD.bazel', language: 'starlark',
+        metadata: { variant: ['//conditions:arm64'], confidence: 'strong' },
+      }]);
+      expect(queries.getUnresolvedReferences()).toContainEqual(expect.objectContaining({
+        referenceName: '//common:arm64',
+        metadata: { variant: ['//conditions:arm64'], confidence: 'strong' },
+      }));
+    } finally {
+      connection.close();
+    }
+  });
+
   it('converts extracted Soong/Make/Bazel targets into one model', () => {
     const records = [
       { filePath: 'system/demo/Android.bp', result: extractFromSource('system/demo/Android.bp', `

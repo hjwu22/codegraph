@@ -388,6 +388,9 @@ export interface UnresolvedReference {
   /** Possible qualified names it might resolve to */
   candidates?: string[];
 
+  /** Extractor evidence that must survive indexing (for example a variant). */
+  metadata?: Record<string, unknown>;
+
   /**
    * `unresolved_refs.id` when this ref was loaded from the database. Post-pass
    * cleanup (delete-on-resolve / park-as-failed) targets exactly this row.

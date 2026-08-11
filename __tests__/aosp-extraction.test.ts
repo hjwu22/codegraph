@@ -49,6 +49,39 @@ describe('AOSP artifact extraction', () => {
     expect(result.nodes).not.toContainEqual(expect.objectContaining({ qualifiedName: 'android.hardware.foo:backend:java' }));
   });
 
+  it('keeps default AIDL backends enabled when backend only opts into Rust', () => {
+    const result = extractFromSource('hardware/interfaces/foo/aidl/Android.bp', `
+      aidl_interface {
+        name: "android.hardware.foo",
+        backend: {
+          rust: { enabled: true, additional_rustlibs: ["libnested"] },
+        },
+      }
+    `);
+    for (const backend of ['java', 'cpp', 'ndk', 'rust']) {
+      expect(result.nodes).toContainEqual(expect.objectContaining({
+        qualifiedName: `android.hardware.foo:backend:${backend}`,
+      }));
+    }
+  });
+
+  it('does not let apostrophes in Blueprint comments swallow later modules', () => {
+    const result = extractFromSource('system/demo/Android.bp', `
+      cc_library {
+        name: "first",
+        // Don't expose this target directly.
+        // shared_libs: ["comment_only_dep"],
+        srcs: ["first.cpp"],
+      }
+      cc_library {
+        name: "second",
+        srcs: ["second.cpp"],
+      }
+    `);
+    expect(result.nodes.filter((node) => node.kind === 'build_target').map((node) => node.name)).toEqual(['first', 'second']);
+    expect(result.unresolvedReferences).not.toContainEqual(expect.objectContaining({ referenceName: 'comment_only_dep' }));
+  });
+
   it('extracts TEST_MAPPING groups, imports, test modules, and filters', () => {
     const result = extractFromSource('system/demo/TEST_MAPPING', JSON.stringify({
       imports: [{ path: 'system/common' }],
@@ -100,6 +133,23 @@ describe('AOSP artifact extraction', () => {
     ]));
   });
 
+  it('uses the matched Make operator rather than += text inside the value', () => {
+    const result = extractFromSource('device/acme/Android.mk', `
+      include $(CLEAR_VARS)
+      LOCAL_MODULE := demo
+      LOCAL_SRC_FILES := stale.cpp
+      LOCAL_SRC_FILES := actual+=name.cpp
+      include $(BUILD_SHARED_LIBRARY)
+    `);
+    const target = result.nodes.find((node) => node.kind === 'build_target' && node.name === 'demo');
+    expect(result.unresolvedReferences).toContainEqual(expect.objectContaining({
+      fromNodeId: target!.id, referenceName: 'actual+=name.cpp', referenceKind: 'references',
+    }));
+    expect(result.unresolvedReferences).not.toContainEqual(expect.objectContaining({
+      fromNodeId: target!.id, referenceName: 'stale.cpp',
+    }));
+  });
+
   it('extracts Bazel targets, loads, glob patterns, and every literal select branch', () => {
     const result = extractFromSource('build/kernel/BUILD.bazel', `
       load("//build/kernel/kleaf:kernel.bzl", "kernel_build")
@@ -129,6 +179,23 @@ describe('AOSP artifact extraction', () => {
     const output = result.nodes.find((node) => node.kind === 'resource' && node.name === 'Image');
     expect(output).toBeDefined();
     expect(result.edges).toContainEqual(expect.objectContaining({ source: target!.id, target: output!.id, kind: 'generates' }));
+  });
+
+  it('does not let apostrophes in Starlark comments swallow later targets', () => {
+    const result = extractFromSource('build/demo/BUILD.bazel', `
+      cc_library(
+        name = "first",
+        # Don't expose this target directly.
+        # deps = ["//comment:only"],
+        srcs = ["first.cpp"],
+      )
+      cc_library(
+        name = "second",
+        srcs = ["second.cpp"],
+      )
+    `);
+    expect(result.nodes.filter((node) => node.kind === 'build_target').map((node) => node.name)).toEqual(['first', 'second']);
+    expect(result.unresolvedReferences).not.toContainEqual(expect.objectContaining({ referenceName: '//comment:only' }));
   });
 
   it('extracts AIDL interfaces and methods', () => {
@@ -162,6 +229,30 @@ describe('AOSP artifact extraction', () => {
     ]));
   });
 
+  it('does not extract AIDL declarations out of comments', () => {
+    // Real AOSP shape: the `aidl_api/` frozen-snapshot header and ordinary doc
+    // comments both contain the word `interface`. AIDL declarations may end in
+    // `;` rather than `{`, so nothing else stops a comment from matching.
+    const result = extractFromSource('android/media/IEco.aidl', `
+      // This file is a snapshot of an AIDL file. Do not edit it manually.
+      // You must not make a backward incompatible change to any AIDL file
+      // built with the aidl_interface module type with versions property set.
+      package android.media;
+
+      /**
+       * Binder interface for ECO (Encoder Camera Optimization) service.
+       * The interface is stable; the parcelable Config below is not.
+       */
+      interface IEco {
+        /* enum Mode is documented elsewhere */
+        void start();
+      }
+    `);
+    const declared = result.nodes.filter((n) => ['interface', 'struct', 'union', 'enum'].includes(n.kind));
+    expect(declared.map((n) => n.name)).toEqual(['IEco']);
+    expect(result.nodes.filter((n) => n.kind === 'method').map((n) => n.name)).toEqual(['start']);
+  });
+
   it('extracts Device Tree nodes, includes, phandles, compatibles, and overlays', () => {
     const result = extractFromSource('arch/arm64/boot/dts/acme.dts', `
       #include "base.dtsi"
@@ -178,6 +269,29 @@ describe('AOSP artifact extraction', () => {
       expect.objectContaining({ fromNodeId: device?.id, referenceName: 'clk0', referenceKind: 'references' }),
       expect.objectContaining({ referenceName: 'uart0', referenceKind: 'overlays' }),
     ]));
+  });
+
+  it('extracts deeply nested Device Tree children without leaking child properties to parents', () => {
+    const result = extractFromSource('arch/arm64/boot/dts/nested.dts', `
+      / {
+        soc {
+          uart0: serial@1000 {
+            compatible = "acme,uart-v2";
+            clocks = <&clk0>;
+          };
+          i2c@2000 {
+            compatible = "acme,i2c";
+          };
+        };
+      };
+    `);
+    const devices = result.nodes.filter((node) => node.kind === 'device');
+    expect(devices).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'soc', signature: 'device node' }),
+      expect.objectContaining({ name: 'uart0', signature: 'compatible=acme,uart-v2' }),
+      expect.objectContaining({ name: 'i2c@2000', signature: 'compatible=acme,i2c' }),
+    ]));
+    expect(devices.find((node) => node.name === 'soc')?.signature).not.toContain('compatible=');
   });
 
   it('extracts Device Tree &label overlay sugar', () => {

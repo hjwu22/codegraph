@@ -122,7 +122,7 @@ export class AospArtifactExtractor {
       line,
       column: 0,
       ...(metadata ? { metadata } : {}),
-    } as UnresolvedReference);
+    });
   }
 
   private addDirectEdge(source: Node, target: Node, kind: EdgeKind, metadata?: Record<string, unknown>): void {
@@ -156,12 +156,30 @@ export class AospArtifactExtractor {
     return text.split(/[\s,]+/).map((v) => v.trim()).filter(Boolean);
   }
 
-  private braceEnd(openOffset: number, open = '{', close = '}'): number {
+  /** Find a balanced delimiter while ignoring quoted strings and DSL comments. */
+  private balancedEnd(
+    text: string,
+    openOffset: number,
+    open = '{',
+    close = '}',
+    hashComments = this.language === 'starlark',
+  ): number {
     let depth = 0;
     let quote = '';
     let escaped = false;
-    for (let i = openOffset; i < this.source.length; i++) {
-      const ch = this.source[i]!;
+    let lineComment = false;
+    let blockComment = false;
+    for (let i = openOffset; i < text.length; i++) {
+      const ch = text[i]!;
+      const next = text[i + 1];
+      if (lineComment) {
+        if (ch === '\n') lineComment = false;
+        continue;
+      }
+      if (blockComment) {
+        if (ch === '*' && next === '/') { blockComment = false; i++; }
+        continue;
+      }
       if (quote) {
         if (escaped) escaped = false;
         else if (ch === '\\') escaped = true;
@@ -169,39 +187,131 @@ export class AospArtifactExtractor {
         continue;
       }
       if (ch === '"' || ch === "'") { quote = ch; continue; }
+      if (hashComments && ch === '#') { lineComment = true; continue; }
+      if (ch === '/' && next === '/') { lineComment = true; i++; continue; }
+      if (ch === '/' && next === '*') { blockComment = true; i++; continue; }
       if (ch === open) depth++;
       else if (ch === close && --depth === 0) return i;
     }
-    return this.source.length - 1;
+    return text.length - 1;
   }
 
-  private extractImports(owner: Node, regex: RegExp, kind: ReferenceKind = 'imports'): void {
+  private braceEnd(openOffset: number, open = '{', close = '}'): number {
+    return this.balancedEnd(this.source, openOffset, open, close);
+  }
+
+  /** Mask comments without changing offsets; quoted comment markers survive. */
+  private maskComments(text: string, hashComments: boolean): string {
+    const chars = text.split('');
+    let quote = '';
+    let escaped = false;
+    let lineComment = false;
+    let blockComment = false;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i]!;
+      const next = text[i + 1];
+      if (lineComment) {
+        if (ch === '\n') lineComment = false;
+        else chars[i] = ' ';
+        continue;
+      }
+      if (blockComment) {
+        if (ch === '*' && next === '/') { chars[i] = chars[i + 1] = ' '; blockComment = false; i++; }
+        else if (ch !== '\n') chars[i] = ' ';
+        continue;
+      }
+      if (quote) {
+        if (escaped) escaped = false;
+        else if (ch === '\\') escaped = true;
+        else if (ch === quote) quote = '';
+        continue;
+      }
+      if (ch === '"' || ch === "'") { quote = ch; continue; }
+      if (hashComments && ch === '#') { chars[i] = ' '; lineComment = true; continue; }
+      if (ch === '/' && next === '/') { chars[i] = chars[i + 1] = ' '; lineComment = true; i++; continue; }
+      if (ch === '/' && next === '*') { chars[i] = chars[i + 1] = ' '; blockComment = true; i++; }
+    }
+    return chars.join('');
+  }
+
+  /** Return a named Blueprint object property's body without truncating nested objects. */
+  private objectPropertyBody(body: string, key: string): string | null {
+    const property = new RegExp(`\\b${key}\\s*:\\s*\\{`).exec(body);
+    if (!property) return null;
+    const open = property.index + property[0].lastIndexOf('{');
+    return body.slice(open + 1, this.balancedEnd(body, open));
+  }
+
+  /** Mask nested brace blocks while preserving offsets and line breaks. */
+  private topLevelBraceText(body: string): string {
+    const chars = body.split('');
+    let depth = 0;
+    let quote = '';
+    let escaped = false;
+    let lineComment = false;
+    let blockComment = false;
+    for (let i = 0; i < body.length; i++) {
+      const ch = body[i]!;
+      const next = body[i + 1];
+      if (lineComment) {
+        if (ch === '\n') lineComment = false;
+        else chars[i] = ' ';
+        continue;
+      }
+      if (blockComment) {
+        if (ch === '*' && next === '/') { chars[i] = chars[i + 1] = ' '; blockComment = false; i++; }
+        else if (ch !== '\n') chars[i] = ' ';
+        continue;
+      }
+      if (quote) {
+        if (depth > 0 && ch !== '\n') chars[i] = ' ';
+        if (escaped) escaped = false;
+        else if (ch === '\\') escaped = true;
+        else if (ch === quote) quote = '';
+        continue;
+      }
+      if (ch === '"' || ch === "'") { quote = ch; if (depth > 0) chars[i] = ' '; continue; }
+      if (ch === '/' && next === '/') { chars[i] = chars[i + 1] = ' '; lineComment = true; i++; continue; }
+      if (ch === '/' && next === '*') { chars[i] = chars[i + 1] = ' '; blockComment = true; i++; continue; }
+      if (ch === '{') { depth++; chars[i] = ' '; continue; }
+      if (ch === '}') { chars[i] = ' '; depth = Math.max(0, depth - 1); continue; }
+      if (depth > 0 && ch !== '\n') chars[i] = ' ';
+    }
+    return chars.join('');
+  }
+
+  private extractImports(owner: Node, regex: RegExp, kind: ReferenceKind = 'imports', text = this.source): void {
     let match: RegExpExecArray | null;
-    while ((match = regex.exec(this.source)) !== null) {
+    while ((match = regex.exec(text)) !== null) {
       this.addRef(owner, match[1]!, kind, this.lineAt(match.index));
     }
   }
 
   private extractAidl(): void {
-    const pkg = /\bpackage\s+([\w.]+)\s*;/.exec(this.source)?.[1] ?? '';
-    if (pkg) this.addNode('namespace', pkg.split('.').pop()!, pkg, this.lineAt(this.source.indexOf(pkg)));
-    this.extractImports(this.fileNode, /\bimport\s+([\w.]+)\s*;/g);
+    // AIDL declarations are NOT required to be followed by `{` (`parcelable X;`
+    // is legal), so an unmasked scan matches the word `interface` inside doc
+    // comments — "Binder interface for ECO service" yields a bogus `for`
+    // interface. Scan comment-masked text; offsets and line breaks survive.
+    const syntax = this.maskComments(this.source, false);
+    const pkg = /\bpackage\s+([\w.]+)\s*;/.exec(syntax)?.[1] ?? '';
+    if (pkg) this.addNode('namespace', pkg.split('.').pop()!, pkg, this.lineAt(syntax.indexOf(pkg)));
+    this.extractImports(this.fileNode, /\bimport\s+([\w.]+)\s*;/g, 'imports', syntax);
 
     const declarations = /(?:@[\w().,="'\s]+\s+)*(?:oneway\s+)?(interface|parcelable|union|enum)\s+(\w+)(?:\s+extends\s+([\w.]+))?/g;
     let m: RegExpExecArray | null;
-    while ((m = declarations.exec(this.source)) !== null) {
+    while ((m = declarations.exec(syntax)) !== null) {
       const keyword = m[1]!;
       const name = m[2]!;
       const kind: NodeKind = keyword === 'interface' ? 'interface' : keyword === 'enum' ? 'enum' : keyword === 'union' ? 'union' : 'struct';
       const qn = pkg ? `${pkg}.${name}` : name;
-      const openCandidate = this.source.indexOf('{', m.index + m[0].length);
-      const semicolon = this.source.indexOf(';', m.index + m[0].length);
+      const openCandidate = syntax.indexOf('{', m.index + m[0].length);
+      const semicolon = syntax.indexOf(';', m.index + m[0].length);
       const open = openCandidate >= 0 && (semicolon < 0 || openCandidate < semicolon) ? openCandidate : -1;
       const end = open >= 0 ? this.braceEnd(open) : semicolon >= 0 ? semicolon : m.index + m[0].length;
       const node = this.addNode(kind, name, qn, this.lineAt(m.index), this.lineAt(end), keyword);
       if (m[3]) this.addRef(node, m[3], 'extends', this.lineAt(m.index));
       if (keyword !== 'interface' || open < 0) continue;
-      const body = this.source.slice(open + 1, end);
+      const body = syntax.slice(open + 1, end);
       const methodRe = /(?:oneway\s+)?([\w.<>\[\]?]+)\s+(\w+)\s*\(([^;{}]*)\)\s*(?:throws\s+[\w.,\s]+)?;/g;
       let mm: RegExpExecArray | null;
       while ((mm = methodRe.exec(body)) !== null) {
@@ -216,12 +326,13 @@ export class AospArtifactExtractor {
   }
 
   private extractBlueprint(): void {
+    const syntax = this.maskComments(this.source, false);
     const moduleRe = /(^|\n)\s*([A-Za-z_]\w*)\s*\{/g;
     let m: RegExpExecArray | null;
-    while ((m = moduleRe.exec(this.source)) !== null) {
-      const open = this.source.indexOf('{', m.index);
+    while ((m = moduleRe.exec(syntax)) !== null) {
+      const open = syntax.indexOf('{', m.index);
       const end = this.braceEnd(open);
-      const body = this.source.slice(open + 1, end);
+      const body = this.maskComments(this.source.slice(open + 1, end), false);
       const name = /\bname\s*:\s*["']([^"']+)["']/.exec(body)?.[1];
       if (!name) { moduleRe.lastIndex = end + 1; continue; }
       const type = m[2]!;
@@ -256,14 +367,12 @@ export class AospArtifactExtractor {
         for (const imports of body.matchAll(/\bimports\s*:\s*\[([\s\S]*?)\]/g)) {
           for (const imported of this.listValues(imports[1]!)) this.addRef(target, imported, 'depends_on', line);
         }
-        const backendProperty = /\bbackend\s*:\s*\{/.exec(body);
-        const backendOpen = backendProperty ? open + 1 + backendProperty.index + backendProperty[0].lastIndexOf('{') : -1;
-        const backendBlock = backendOpen >= 0 ? this.source.slice(backendOpen + 1, this.braceEnd(backendOpen)) : '';
+        const backendBlock = this.objectPropertyBody(body, 'backend');
         for (const backend of ['java', 'cpp', 'ndk', 'rust']) {
-          const block = new RegExp(`\\b${backend}\\s*:\\s*\\{([\\s\\S]*?)\\}`).exec(backendBlock)?.[1];
-          if (backendProperty && !block) continue;
-          if (block && /\benabled\s*:\s*false/.test(block)) continue;
-          if (!backendProperty && backend === 'rust') continue;
+          const block = backendBlock === null ? null : this.objectPropertyBody(backendBlock, backend);
+          const explicit = block === null ? undefined : /\benabled\s*:\s*(true|false)/.exec(block)?.[1];
+          const enabled = explicit ? explicit === 'true' : backend !== 'rust';
+          if (!enabled) continue;
           const generated = this.addNode('resource', `${name}-${backend}`, `${name}:backend:${backend}`, line, line,
             `generated AIDL ${backend} backend`, target);
           this.addDirectEdge(target, generated, 'generates', { synthesizedBy: 'aidl-interface-static', confidence: 'strong' });
@@ -274,16 +383,19 @@ export class AospArtifactExtractor {
   }
 
   private extractStarlark(): void {
+    const syntax = this.maskComments(this.source, true);
     const loadRe = /\bload\s*\(\s*["']([^"']+)["']/g;
-    this.extractImports(this.fileNode, loadRe);
+    for (const load of syntax.matchAll(loadRe)) {
+      this.addRef(this.fileNode, load[1]!, 'imports', this.lineAt(load.index!));
+    }
     const ruleRe = /(^|\n)\s*([A-Za-z_]\w*)\s*\(/g;
     let m: RegExpExecArray | null;
-    while ((m = ruleRe.exec(this.source)) !== null) {
+    while ((m = ruleRe.exec(syntax)) !== null) {
       const type = m[2]!;
       if (type === 'load' || ['glob', 'select', 'depset'].includes(type)) continue;
-      const open = this.source.indexOf('(', m.index);
+      const open = syntax.indexOf('(', m.index);
       const end = this.braceEnd(open, '(', ')');
-      const body = this.source.slice(open + 1, end);
+      const body = this.maskComments(this.source.slice(open + 1, end), true);
       const name = /\bname\s*=\s*["']([^"']+)["']/.exec(body)?.[1];
       if (!name) continue;
       const pkg = path.posix.dirname(this.filePath.replace(/\\/g, '/'));
@@ -328,8 +440,19 @@ export class AospArtifactExtractor {
     let depth = 0;
     let quote = '';
     let escaped = false;
+    let lineComment = false;
+    let blockComment = false;
     for (let i = start; i < body.length; i++) {
       const ch = body[i]!;
+      const next = body[i + 1];
+      if (lineComment) {
+        if (ch === '\n') lineComment = false;
+        continue;
+      }
+      if (blockComment) {
+        if (ch === '*' && next === '/') { blockComment = false; i++; }
+        continue;
+      }
       if (quote) {
         if (escaped) escaped = false;
         else if (ch === '\\') escaped = true;
@@ -337,6 +460,9 @@ export class AospArtifactExtractor {
         continue;
       }
       if (ch === '"' || ch === "'") { quote = ch; continue; }
+      if (ch === '#') { lineComment = true; continue; }
+      if (ch === '/' && next === '/') { lineComment = true; i++; continue; }
+      if (ch === '/' && next === '*') { blockComment = true; i++; continue; }
       if (ch === '[' || ch === '(' || ch === '{') depth++;
       else if (ch === ']' || ch === ')' || ch === '}') depth = Math.max(0, depth - 1);
       else if (ch === ',' && depth === 0) return body.slice(start, i).trim();
@@ -409,11 +535,11 @@ export class AospArtifactExtractor {
       if (/\\\s*$/.test(raw)) { continued = raw.replace(/\\\s*$/, ' '); continue; }
       continued = '';
       if (/include\s+\$\(CLEAR_VARS\)/.test(raw)) { vars.clear(); moduleStart = lineNo; continue; }
-      const assignment = /^\s*([A-Za-z0-9_.$(){}-]+)\s*(?::=|\+=|=)\s*(.*?)\s*$/.exec(raw.replace(/\s+#.*$/, ''));
+      const assignment = /^\s*([A-Za-z0-9_.$(){}-]+)\s*(:=|\+=|=)\s*(.*?)\s*$/.exec(raw.replace(/\s+#.*$/, ''));
       if (assignment) {
-        const values = assignment[2]!.split(/\s+/).filter(Boolean);
+        const values = assignment[3]!.split(/\s+/).filter(Boolean);
         const current = vars.get(assignment[1]!) ?? [];
-        vars.set(assignment[1]!, raw.includes('+=') ? [...current, ...values] : values);
+        vars.set(assignment[1]!, assignment[2] === '+=' ? [...current, ...values] : values);
         if (/^PRODUCT_(?:PACKAGES|PACKAGES_DEBUG)$/.test(assignment[1]!)) {
           const product = this.addNode('build_target', path.posix.basename(this.filePath), `product:${this.filePath}`, lineNo, lineNo, assignment[1]);
           for (const dep of values) this.addRef(product, dep, 'depends_on', lineNo);
@@ -429,30 +555,33 @@ export class AospArtifactExtractor {
 
   private extractDeviceTree(): void {
     this.extractImports(this.fileNode, /(?:#include|\/include\/)\s*[<"]([^>"]+)[>"]/g);
+    const syntax = this.maskComments(this.source, false);
     const nodeRe = /(?:^|\n)\s*(?:([A-Za-z_]\w*)\s*:\s*)?([A-Za-z_][\w,.-]*)(?:@([0-9a-fA-F]+))?\s*\{/g;
     let m: RegExpExecArray | null;
-    while ((m = nodeRe.exec(this.source)) !== null) {
+    while ((m = nodeRe.exec(syntax)) !== null) {
       const name = m[1] || `${m[2]}${m[3] ? `@${m[3]}` : ''}`;
-      const open = this.source.indexOf('{', m.index);
+      const open = syntax.indexOf('{', m.index);
       const end = this.braceEnd(open);
       const body = this.source.slice(open + 1, end);
+      const properties = this.topLevelBraceText(body);
       if (m[2] === 'fragment' && !m[1]) {
         const line = this.lineAt(m.index);
         const fragment = this.addNode('device', name, `${this.filePath}::${name}`, line, this.lineAt(end), 'Device Tree overlay fragment');
-        const target = /\btarget\s*=\s*<&([A-Za-z_]\w*)>/.exec(body);
+        const target = /\btarget\s*=\s*<&([A-Za-z_]\w*)>/.exec(properties);
         if (target) this.addRef(fragment, target[1]!, 'overlays', line);
         // Do not jump to the fragment end: nested __overlay__ child devices
         // remain eligible for ordinary node extraction.
         continue;
       }
       if (m[2] === '__overlay__' && !m[1]) continue;
-      const compatibles = [...body.matchAll(/\bcompatible\s*=\s*([^;]+);/g)].flatMap((cm) => this.listValues(cm[1]!));
+      const compatibles = [...properties.matchAll(/\bcompatible\s*=\s*([^;]+);/g)].flatMap((cm) => this.listValues(cm[1]!));
       const line = this.lineAt(m.index);
       const node = this.addNode('device', name, `${this.filePath}::${name}`, line, this.lineAt(end), compatibles.length ? `compatible=${compatibles.join('|')}` : 'device node');
-      for (const ref of body.matchAll(/&([A-Za-z_]\w*)/g)) this.addRef(node, ref[1]!, 'references', this.lineAt(open + ref.index!));
-      const overlay = /\btarget\s*=\s*<&([A-Za-z_]\w*)>/.exec(body);
+      for (const ref of properties.matchAll(/&([A-Za-z_]\w*)/g)) this.addRef(node, ref[1]!, 'references', this.lineAt(open + 1 + ref.index!));
+      const overlay = /\btarget\s*=\s*<&([A-Za-z_]\w*)>/.exec(properties);
       if (overlay) this.addRef(node, overlay[1]!, 'overlays', line);
-      nodeRe.lastIndex = end + 1;
+      // Keep scanning inside this range: real Device Trees are deeply nested.
+      // `properties` masks child blocks so parents do not inherit child facts.
     }
     // Overlay sugar used by plugin sources: &label { ... }.
     for (const overlay of this.source.matchAll(/(?:^|\n)\s*&([A-Za-z_]\w*)\s*\{/g)) {
@@ -463,20 +592,23 @@ export class AospArtifactExtractor {
   }
 
   private extractHidl(): void {
-    const pkg = /\bpackage\s+([\w.]+)@([\d.]+)\s*;/.exec(this.source);
+    // Same comment hazard as AIDL; the trailing `{` currently masks it, so this
+    // is defence in depth rather than an observed defect.
+    const syntax = this.maskComments(this.source, false);
+    const pkg = /\bpackage\s+([\w.]+)@([\d.]+)\s*;/.exec(syntax);
     const prefix = pkg ? `${pkg[1]}@${pkg[2]}` : '';
-    this.extractImports(this.fileNode, /\bimport\s+([\w.]+@[\d.]+(?:::\w+)?)\s*;/g);
+    this.extractImports(this.fileNode, /\bimport\s+([\w.]+@[\d.]+(?:::\w+)?)\s*;/g, 'imports', syntax);
     const declRe = /\b(interface|struct|union|enum)\s+(\w+)(?:\s+extends\s+([\w.@:]+))?\s*\{/g;
     let m: RegExpExecArray | null;
-    while ((m = declRe.exec(this.source)) !== null) {
+    while ((m = declRe.exec(syntax)) !== null) {
       const kind: NodeKind = m[1] === 'interface' ? 'interface' : m[1] === 'struct' ? 'struct' : m[1] === 'union' ? 'union' : 'enum';
       const qn = prefix ? `${prefix}::${m[2]}` : m[2]!;
-      const open = this.source.indexOf('{', m.index);
+      const open = syntax.indexOf('{', m.index);
       const end = this.braceEnd(open);
       const node = this.addNode(kind, m[2]!, qn, this.lineAt(m.index), this.lineAt(end), m[1]);
       if (m[3]) this.addRef(node, m[3], 'extends', this.lineAt(m.index));
       if (kind === 'interface') {
-        const body = this.source.slice(open + 1, end);
+        const body = syntax.slice(open + 1, end);
         for (const mm of body.matchAll(/\b(\w+)\s*\(([^)]*)\)\s*(?:generates\s*\(([^)]*)\))?\s*;/g)) {
           this.addNode('method', mm[1]!, `${qn}::${mm[1]}`, this.lineAt(open + 1 + mm.index!), this.lineAt(open + 1 + mm.index!), `${mm[1]}(${mm[2]})${mm[3] ? ` generates (${mm[3]})` : ''}`, node);
         }
@@ -486,18 +618,19 @@ export class AospArtifactExtractor {
   }
 
   private extractProto(): void {
-    const pkg = /\bpackage\s+([\w.]+)\s*;/.exec(this.source)?.[1] ?? '';
-    this.extractImports(this.fileNode, /\bimport\s+(?:public\s+|weak\s+)?["']([^"']+)["']\s*;/g);
+    const syntax = this.maskComments(this.source, false);
+    const pkg = /\bpackage\s+([\w.]+)\s*;/.exec(syntax)?.[1] ?? '';
+    this.extractImports(this.fileNode, /\bimport\s+(?:public\s+|weak\s+)?["']([^"']+)["']\s*;/g, 'imports', syntax);
     const declRe = /\b(message|enum|service)\s+(\w+)\s*\{/g;
     let m: RegExpExecArray | null;
-    while ((m = declRe.exec(this.source)) !== null) {
+    while ((m = declRe.exec(syntax)) !== null) {
       const kind: NodeKind = m[1] === 'message' ? 'struct' : m[1] === 'service' ? 'interface' : 'enum';
       const qn = pkg ? `${pkg}.${m[2]}` : m[2]!;
-      const open = this.source.indexOf('{', m.index);
+      const open = syntax.indexOf('{', m.index);
       const end = this.braceEnd(open);
       const node = this.addNode(kind, m[2]!, qn, this.lineAt(m.index), this.lineAt(end), m[1]);
       if (m[1] === 'service') {
-        const body = this.source.slice(open + 1, end);
+        const body = syntax.slice(open + 1, end);
         for (const rpc of body.matchAll(/\brpc\s+(\w+)\s*\(([^)]*)\)\s+returns\s*\(([^)]*)\)/g)) {
           const method = this.addNode('method', rpc[1]!, `${qn}::${rpc[1]}`, this.lineAt(open + 1 + rpc.index!), this.lineAt(open + 1 + rpc.index!), `rpc ${rpc[1]}(${rpc[2]}) returns (${rpc[3]})`, node);
           this.addRef(method, rpc[2]!, 'references', method.startLine);

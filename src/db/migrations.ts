@@ -9,7 +9,7 @@ import { SqliteDatabase } from './sqlite-adapter';
 /**
  * Current schema version
  */
-export const CURRENT_SCHEMA_VERSION = 9;
+export const CURRENT_SCHEMA_VERSION = 10;
 
 /**
  * Migration definition
@@ -175,6 +175,25 @@ const migrations: Migration[] = [
       db.exec(
         'CREATE INDEX IF NOT EXISTS idx_files_generated ON files(path) WHERE generated = 1'
       );
+    },
+  },
+  {
+    version: 10,
+    description: 'Persist unresolved-reference metadata for conditional build evidence',
+    up: (db) => {
+      // Some migration tests and recovery tools intentionally replay the
+      // version ledger against a minimal schema containing only the table
+      // under test. Treat an absent unresolved_refs table as nothing to
+      // migrate; a real CodeGraph v1+ database always has it, while a fresh
+      // database receives the current definition from schema.sql.
+      const table = db.prepare(
+        "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'unresolved_refs'"
+      ).get() as { present: number } | undefined;
+      if (!table) return;
+      const cols = db.prepare('PRAGMA table_info(unresolved_refs)').all() as Array<{ name: string }>;
+      if (!cols.some((c) => c.name === 'metadata')) {
+        db.exec('ALTER TABLE unresolved_refs ADD COLUMN metadata TEXT');
+      }
     },
   },
 ];
