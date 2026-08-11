@@ -212,6 +212,99 @@ probe 腳本保存於 `/tmp/.../scratchpad/flow-probe.mjs`(非持久),邏輯已�
 
 ---
 
+## M — 第二輪:擴大索引後的 channel 驗證
+
+第一輪的索引子樹(`hardware/interfaces` + `system/core` + `system/sepolicy`)缺 Java 與
+kernel 原始碼,因此 JNI 與兩個 Device Tree channel 等於沒被測到。第二輪補上。
+
+### Stage A — 加入 `frameworks/base` 的 JNI 配對子樹
+
+加入 `core/java`(83 MB)+ `core/jni`(4.4 MB)+ `services/core/jni`(1.5 MB)。
+
+| | 前 | 後 |
+|---|---|---|
+| 索引檔案 | 22,830 | 28,707 |
+| 節點 / 邊 | 328k / 678k | **555,686 / 1,284,602** |
+| java 節點 | 371 | 207,236 |
+| `aosp-jni` | **1** | **615** |
+| 索引時間 | 8m11s | **16m37s** |
+| watchdog | 未觸發 | 未觸發 |
+
+JNI 抽樣 14 條全部正確,兩種偵測路徑都涵蓋:
+
+```
+android.os::Process::createProcessGroup   -> android_os_Process_createProcessGroup   exact  (名稱編碼)
+AssetManager::nativeAssetDestroy          -> NativeAssetDestroy                      exact  (JNINativeMethod 表)
+SurfaceControl::nativeSetCornerRadius     -> nativeSetCornerRadius                   exact
+GraphicsEnvironment::setDriverPathAnd...  -> setDriverPathAndSphalLibraries_native   strong
+```
+
+**新發現(未修,屬設計決策):反向 JNI 實質不可用。** 方向分佈是 614 條 java→cpp、
+**僅 1 條** cpp→java,但樹中有 89 個檔案同時具備 `FindClass` + `GetMethodID` +
+`Call*Method` 三個訊號。以 `frameworks/base/core/jni/android_view_DisplayEventReceiver.cpp`
+查證,兩個獨立原因:
+
+```
+215–307  env->CallVoidMethod(..., gDisplayEventReceiverClassInfo.dispatchVsync, ...)
+389      jclass clazz = FindClassOrDie(env, "android/view/DisplayEventReceiver");
+393–404  GetMethodIDOrDie(env, ...clazz, "dispatchVsync", "(JJI)V")
+```
+
+1. **三個訊號分屬不同函式。** AOSP 慣例是 registration 函式把 `jclass`/`jmethodID` 快取進
+   static struct,callback 函式後來才用快取 ID。`jniSynthesizer` 卻要求三者出現在同一個
+   函式 body 內。
+2. **AOSP 使用 `FindClassOrDie` / `GetMethodIDOrDie` 包裝函式。** 正則 `\bFindClass\s*\(`
+   對不上,且它預期字串字面值是第一個參數,AOSP 的第一個參數是 `env`。
+
+只修原因 2 不會多出任何一條邊。跨函式追蹤快取 static 是設計變更,留給作者決定。正向那
+614 條品質很好,且「這個 native 方法實作在哪」本身是完整答案 —— 需要修正的是 CHANGELOG
+的 **bidirectional JNI** 宣稱,資料不支持。
+
+### Stage B — kernel Device Tree(獨立索引)
+
+`kernel-eval` = arm64 dts(1,699 檔)+ 10 個 driver 子系統(712 個含 `.compatible` 表的
+C 檔)+ Documentation 的 binding schema(3,697 個 yaml),共 6,782 檔,**索引 29 秒**。
+
+| synthesizer | 邊數 | 精確度 |
+|---|---:|---|
+| `aosp-devicetree-driver` | **11,456** | 抽樣 12 條全對 |
+| `aosp-devicetree-binding` | 28,797 → **9,139**(修正後) | 修正前抽樣 12 條僅 1 條正確 |
+
+driver 抽樣:
+
+```
+i2c4        qcom,geni-i2c            -> geni_i2c_probe        busses/i2c-qcom-geni.c
+dispcc      qcom,sdm845-dispcc       -> disp_cc_sdm845_probe  qcom/dispcc-sdm845.c
+pca9450     nxp,pca9450a             -> pca9450_i2c_probe     regulator/pca9450-regulator.c
+pmu@90b6400 qcom,sc8280xp-cpu-bwmon  -> bwmon_probe           qcom/icc-bwmon.c
+```
+
+扇出最大 12、中位數 2。最高量的 `regulator-fixed`(3,178 條)全部指向
+`drivers/regulator/fixed.c` 的兩個函式 —— 正確,只是 device tree 裡固定電壓調節器本來就多。
+
+**新發現(已修,commit `0aa6259`):binding 用通用 compatible 亂配。** Device Tree 的
+`compatible` 是**有序清單、最specific 在前**,但 synthesizer 對每個項目都比對,於是尾端的
+通用 `arm,primecell`(有 30 個 schema 宣告它)讓每個 PrimeCell 週邊互相配對:
+
+```
+gpio15  arm,pl061|arm,primecell  -> serio/arm,pl050.yaml    ❌ GPIO 配到 PS/2
+pdma0   arm,pl330|arm,primecell  -> rtc/arm,pl031.yaml      ❌ DMA 配到 RTC
+timer2  arm,sp804|arm,primecell  -> coresight-replicator    ❌
+```
+
+19,176 / 28,797 = **66.6%** 的邊是靠 `arm,primecell` 建立的。修法:依序取用、命中即停;並
+跳過被超過三個 schema 宣告的字串 —— 真實樹的分佈是雙峰的,5,132 個 compatible 中 5,101 個
+(99.4%)只對應一個 schema,只有 `arm,primecell`(30)與 `qcom,mdss-dsi-ctrl`(15)超標。
+修正後 9,139 條、以 primecell 為證據者 **0** 條、抽樣 12 條全對。
+
+### 這一輪修掉的兩個缺陷屬於同一類
+
+selinux 的 `*` catch-all 與 device tree 的 `arm,primecell`,都是**沒有識別力的通用字串被當
+成識別證據**。兩者都造成約 66–70% 的邊是錯的,且都被標為 `confidence: 'exact'`。值得在
+review 其餘 synthesizer 時當成一個檢查項:這個比對鍵有沒有可能是通用值?
+
+---
+
 ## I — 僅程式碼檢視,未執行驗證
 
 - **#3** compile_commands 逐檔範圍化:`scoped && scoped.length > 0 ? scoped : index.all`
@@ -228,15 +321,13 @@ probe 腳本保存於 `/tmp/.../scratchpad/flow-probe.mjs`(非持久),邏輯已�
 
 ## N — 未測試 / 未解決
 
-1. **Agent A/B 完全未執行。** `claude` CLI 未安裝(A/B 是量測 token 節省的唯一方法)。
+1. **Agent A/B 完全未執行。** `claude` CLI 已安裝(2.1.228,harness 用到的 9 個旗標全部
+   存在)但**尚未登入** —— headless 回傳 `Not logged in`。A/B 是量測 token 節省的唯一方法。
    `5edfb69` 的 ledger 也誠實標記為 pending authorization。
-2. **JNI channel 未有效測試** —— `aosp-jni` 只產出 1 條邊,因為測試子樹只有 371 個 java
-   節點。要驗證需索引 `frameworks/base`。
-3. **Device Tree 兩個 synthesizer 未測試** —— 抽取層已用真實 kernel .dts 驗過(見 #1),
-   但 driver/binding 綁定需要同時有 .dts 與 kernel C 原始碼的索引。
-4. **`selinuxBindingSynthesizer` 未被修正也未做精確度抽樣。** 它仍是巢狀迴圈,且對
-   `property_contexts` 這種前綴語意用 `startsWith` 比對卻標記 `confidence: 'exact'`。
-   2,157 條邊的正確性未驗證。
+2. **反向 JNI(cpp→java)實質不可用** —— 見上「Stage A」。未修,屬設計決策。
+3. **`aosp-hal-vintf` 只有 31 條且全為 HIDL** —— AIDL 版 VINTF 未被測到。
+4. **`aosp-selinux-binding` 修正後的 645 條未再抽驗** —— 已確認 catch-all 那 1,512 條被
+   正確移除,但剩下的邊只看過修正前的樣本。
 5. **`synthesizeAospEdges` 仍為全同步、無 cooperative yield。** 目前規模只需 ~6 秒,但
    `synthesizeCallbackEdges` 是 async 有 yield 才能安全地花 318 秒。AOSP 合成沒有這層保護,
    規模再放大時 watchdog 風險會回來。
@@ -249,14 +340,24 @@ probe 腳本保存於 `/tmp/.../scratchpad/flow-probe.mjs`(非持久),邏輯已�
 
 ## 索引整個 AOSP 的差距
 
-以實測的 22,830 檔 → 327,636 nodes / 677,612 edges / RSS 2.9 GB / 8m11s 線性外推:
+現在有兩個實測點,可以看出**時間是超線性的**:
 
-| 目標 | 倍數 | 預估 nodes | 預估 DB | 預估 RSS | 預估時間 |
-|---|---:|---:|---:|---:|---:|
-| 平台層 209k 檔 | 9.2× | ~3.0M | ~7 GB | ~26 GB | ~75 分 |
-| 全部原始檔 846k 檔 | 37× | ~12.1M | ~28 GB | 遠超 RAM | ~5 小時 |
+| 檔案數 | 節點 | 邊 | 索引時間 | `callback-synthesis` |
+|---:|---:|---:|---:|---:|
+| 22,830 | 327,636 | 677,612 | 8m11s | 336s |
+| 28,707 | 555,686 | 1,284,602 | **16m37s** | **752s** |
 
-線性外推是**樂觀值** —— resolution 的名稱比對是超線性的。
+檔案數 ×1.26,時間 ×2.03。主要成長來自既有的 `cFnPtrEdges`(C 函式指標合成),**不屬於這個
+PR**,但它是平台層規模下的主要瓶頸。
+
+以此外推(取 ×1.26 檔案 → ×2.0 時間的比例,而非線性):
+
+| 目標 | 檔案倍數 | 預估 nodes | 預估時間 |
+|---|---:|---:|---:|
+| 平台層 209k 檔 | 7.3× | ~4M | **遠超 75 分**,可能數小時 |
+| 全部原始檔 846k 檔 | 29× | ~16M | 不可行 |
+
+先前文件裡「平台層約 75 分鐘」的線性估算是**低估的**,以此更正。
 
 阻塞項,依嚴重度:
 
