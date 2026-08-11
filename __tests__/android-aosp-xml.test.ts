@@ -18,6 +18,20 @@ afterEach(() => {
 });
 
 describe('Android semantic XML extraction', () => {
+  it('does not misclassify Maven POM configuration/resources as Android XML', () => {
+    const result = extractFromSource('pom.xml', `
+      <project>
+        <build>
+          <resources><resource><directory>src/main/resources</directory></resource></resources>
+          <plugins><plugin><configuration><option name="module" value="NotATest" /></configuration></plugin></plugins>
+        </build>
+      </project>
+    `);
+    expect(result.nodes).toHaveLength(1);
+    expect(result.nodes[0]).toMatchObject({ kind: 'file', filePath: 'pom.xml' });
+    expect(result.unresolvedReferences).toEqual([]);
+  });
+
   it('extracts Tradefed tests, preparers, filters, and module dependencies', () => {
     const result = extractFromSource('system/demo/AndroidTest.xml', `
       <configuration description="Demo device test">
@@ -58,6 +72,26 @@ describe('Android semantic XML extraction', () => {
       expect.objectContaining({ referenceName: 'com.acme.demo.MainActivity', referenceKind: 'references' }),
       expect.objectContaining({ referenceName: 'android', referenceKind: 'overlays' }),
     ]));
+  });
+
+  it('matches exact XML attribute names instead of suffix attributes', () => {
+    const manifest = extractFromSource('packages/apps/Demo/AndroidManifest.xml', `
+      <manifest package="com.acme.demo" xmlns:android="http://schemas.android.com/apk/res/android">
+        <application>
+          <activity tools:layout_name=".Wrong" android:name=".RealActivity" />
+        </application>
+      </manifest>
+    `);
+    expect(manifest.nodes).toContainEqual(expect.objectContaining({ qualifiedName: 'com.acme.demo.RealActivity' }));
+    expect(manifest.nodes).not.toContainEqual(expect.objectContaining({ qualifiedName: 'com.acme.demo.Wrong' }));
+
+    const tradefed = extractFromSource('system/demo/AndroidTest.xml', `
+      <configuration description="Demo">
+        <test superclass="wrong.Base" class="com.android.RealTest" />
+      </configuration>
+    `);
+    expect(tradefed.unresolvedReferences).toContainEqual(expect.objectContaining({ referenceName: 'com.android.RealTest' }));
+    expect(tradefed.unresolvedReferences).not.toContainEqual(expect.objectContaining({ referenceName: 'wrong.Base' }));
   });
 
   it('extracts runtime resource overlay mapping entries', () => {
@@ -119,6 +153,8 @@ describe('Android semantic XML extraction', () => {
       expect.objectContaining({ kind: 'service', qualifiedName: 'android.hardware.foo::IFoo/default' }),
     ]));
     expect(result.unresolvedReferences).toContainEqual(expect.objectContaining({ referenceName: 'IFoo/default', referenceKind: 'binds' }));
+    expect(result.unresolvedReferences).toContainEqual(expect.objectContaining({ referenceName: 'IFoo/default', line: 6 }));
+    expect(result.nodes).toContainEqual(expect.objectContaining({ qualifiedName: 'android.hardware.foo::IFoo/default', startLine: 7 }));
   });
 });
 
@@ -156,7 +192,10 @@ describe('AOSP Android resource scan policy', () => {
     fs.mkdirSync(path.join(dir, '.repo'), { recursive: true });
     fs.writeFileSync(path.join(dir, '.repo', 'manifest.xml'), '<manifest/>');
     fs.writeFileSync(path.join(dir, 'codegraph.json'), JSON.stringify({ aosp: { indexAndroidResources: false } }));
-    expect(buildDefaultIgnore(dir).ignores('frameworks/base/core/res/res/values/strings.xml')).toBe(true);
+    const matcher = buildDefaultIgnore(dir);
+    expect(matcher.ignores('frameworks/base/core/res/res/values/strings.xml')).toBe(true);
+    expect(matcher.ignores('build/soong/Android.bp')).toBe(false);
+    expect(matcher.ignores('vendor/acme/Android.mk')).toBe(false);
   });
 
   it('allows a standalone platform repository to force-enable the AOSP resource profile', () => {

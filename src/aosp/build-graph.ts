@@ -101,8 +101,9 @@ export class StaticExtractionBuildGraphProvider implements BuildGraphProvider {
             .filter((r) => r.referenceKind === 'depends_on')
             .map((r) => r.referenceName),
           variants: refs.flatMap((r) => {
-            const metadata = (r as unknown as { metadata?: { variant?: string[] } }).metadata;
-            return (metadata?.variant ?? []).map((expression) => ({ expression, source: 'static' as const }));
+            const variant = r.metadata?.variant;
+            return (Array.isArray(variant) ? variant.filter((value): value is string => typeof value === 'string') : [])
+              .map((expression) => ({ expression, source: 'static' as const }));
           }),
           metadata: { sourceFile: filePath, extractionNodeId: node.id },
         });

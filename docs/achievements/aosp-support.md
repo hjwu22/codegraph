@@ -40,6 +40,10 @@ extraction is always safe and zero-build; authoritative enrichment only reads
 artifacts the user already produced. CodeGraph never runs Soong, Kati, Bazel,
 dtc, Kconfig, or an AOSP build as a side effect.
 
+An independent review of feature commit `f3e49ca` produced 15 findings. The
+complete disposition, including the one deliberately authorization-gated item,
+is recorded in [`docs/reviews/aosp-review-remediation.md`](../reviews/aosp-review-remediation.md).
+
 ```mermaid
 flowchart LR
   S["Static AOSP source"] --> E["Tolerant extractors"]
@@ -251,9 +255,9 @@ silently reimplemented an Android build tool.
 
 ## Completion-audit findings and remediation
 
-The final audit did not accept earlier feature names as proof. It found four
+The initial completion audit did not accept feature names as proof. It found
 places where an implementation existed but the user-visible requirement was
-not yet proven; all four were corrected before this record was finalized.
+not yet proven; the following gaps were corrected before the feature commit.
 
 | Audit finding | Why the earlier evidence was insufficient | Remediation and proof |
 |---|---|---|
@@ -289,8 +293,9 @@ by SDK consumers rather than only by internal tests.
   Android Make, HIDL, Proto, init rc, sysprop, SELinux, and Kconfig inputs.
 - [x] Added conservative AOSP workspace detection based on `.repo`, Soong/Make,
   or canonical AOSP source-tree markers.
-- [x] Bumped the extraction version from 25 to 26 so older indexes are reported
-  as stale rather than silently missing the new graph content.
+- [x] Bumped the extraction version from 25 to 26 for the feature, then to 27
+  during review remediation so indexes created before unresolved-reference
+  metadata persistence are reported as stale.
 
 ### Evidence
 
@@ -372,6 +377,9 @@ by SDK consumers rather than only by internal tests.
   multi-grammar parses.
 - Device Tree `tree-sitter-devicetree@0.15.0`: ABI 15, 50/50 clean repeated
   multi-grammar parses.
+- These WASMs are pinned health/provenance inputs. Production grammar expansion
+  filters both dedicated custom extractors before byte read, worker broadcast,
+  or instantiation; the runtime scanners remain the tolerant AOSP extractors.
 - AST discovery output verified the Starlark call/keyword-argument and Device
   Tree node/property/reference shapes. Reproduction and artifact provenance are
   in `docs/grammars/tree-sitter-aosp.md`.
@@ -424,13 +432,13 @@ agent A/B runs are never started implicitly; if prerequisites are unavailable,
 the engineering benchmark remains explicitly pending.
 
 - `npm run build` — passed after all current AOSP changes.
-- AOSP-specific suite — 82 tests passed across six files. It includes a real
+- AOSP-specific suite — 92 tests passed across six files. It includes a real
   temporary-project `indexAll()` path that persists JNI, init/build, resource,
   build-source, selected-Kconfig, and test-impact edges; module-info, Bazel-only,
   and kernel-config-only enrichment paths; real Bazel query/cquery jsonproto;
   and an execution of the built `codegraph affected` CLI.
-- Broad focused regression — 270 tests passed across ten files, adding the full
-  181-test resolution suite, ordinary Android resource exclusion, shared test
+- Broad focused regression — 281 tests passed across ten files, adding the full
+  182-test resolution suite, ordinary Android resource exclusion, shared test
   classification, and existing affected-path normalization to the AOSP suites.
 - `codegraph aosp enrich --help` — passed and lists `--module-info`,
   `--bazel-query`, and `--kernel-config`. A runtime package-entry check loaded
@@ -441,13 +449,13 @@ the engineering benchmark remains explicitly pending.
   AOSP discovery suite. A Rust compile was not run because `cargo` is not
   installed in this workspace; the native kernel remains optional and the
   TypeScript/WASM path is the validated runtime here.
-- Full suite in the restricted sandbox — 2,969 passed and 11 failed across four
-  files. Every failure exposed an environmental denial (`listen EPERM` for TCP
-  or Unix sockets) or the resulting real-watcher timeout, not an AOSP
-  assertion. Those exact four suites were rerun with local socket/watch access
-  and all 53 tests passed. The combined evidence therefore covers all executed
-  tests; 182 native parity tests remained skipped by the repository's existing
-  environment gates.
+- Full suite in the restricted sandbox — 2,980 passed and 11 failed across five
+  files. The failures were TCP/Unix-socket `listen EPERM`, the resulting daemon
+  and real-watcher timeouts, plus one five-second multi-repo sync timeout under
+  full-suite contention; none was an AOSP assertion. Those exact five suites
+  were rerun with local socket/watch access and all 78 tests passed. The combined
+  evidence therefore covers all executed tests; 182 native parity tests remained
+  skipped by the repository's existing environment gates.
 
 ## Known residual gaps and next steps
 
@@ -465,5 +473,5 @@ These are explicit product boundaries, not silently claimed as complete:
    extraction benchmark above is complete; comparative answer-quality scoring
    remains optional follow-up work.
 
-No commit, branch switch, push, Android build, or destructive repository action
-was performed.
+Git history records the feature and remediation branches and commits. No Android
+build, paid external agent run, or destructive repository action was performed.

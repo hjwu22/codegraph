@@ -8,10 +8,15 @@ export class AospMetadataExtractor {
   private readonly edges: Edge[] = [];
   private readonly refs: UnresolvedReference[] = [];
   private readonly errors: ExtractionError[] = [];
+  private readonly lineStarts: number[] = [0];
   private readonly now = Date.now();
   private fileNode!: Node;
 
-  constructor(private readonly filePath: string, private readonly source: string, private readonly kind: 'test-mapping' | 'dt-binding') {}
+  constructor(private readonly filePath: string, private readonly source: string, private readonly kind: 'test-mapping' | 'dt-binding') {
+    for (let i = 0; i < source.length; i++) {
+      if (source.charCodeAt(i) === 10) this.lineStarts.push(i + 1);
+    }
+  }
 
   extract(): ExtractionResult {
     const started = Date.now();
@@ -28,7 +33,16 @@ export class AospMetadataExtractor {
     return { nodes: this.nodes, edges: this.edges, unresolvedReferences: this.refs, errors: this.errors, durationMs: Date.now() - started };
   }
 
-  private lineAt(offset: number): number { return this.source.slice(0, Math.max(0, offset)).split('\n').length; }
+  private lineAt(offset: number): number {
+    let lo = 0;
+    let hi = this.lineStarts.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (this.lineStarts[mid]! <= Math.max(0, offset)) lo = mid + 1;
+      else hi = mid;
+    }
+    return Math.max(1, lo);
+  }
   private node(kind: NodeKind, name: string, qualifiedName: string, line: number, signature?: string, parent: Node | null = this.fileNode): Node {
     const node: Node = {
       id: generateNodeId(this.filePath, kind, qualifiedName, line), kind, name, qualifiedName,

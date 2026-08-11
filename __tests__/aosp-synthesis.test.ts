@@ -115,6 +115,32 @@ describe('AOSP cross-language synthesis', () => {
     ]));
   });
 
+  it('indexes AIDL binding declarations once instead of rescanning every type per interface', () => {
+    const foo = node('foo', 'interface', 'IFoo', 'android.foo.IFoo', 'IFoo.aidl', 'aidl');
+    const bar = node('bar', 'interface', 'IBar', 'android.foo.IBar', 'IBar.aidl', 'aidl');
+    const fooImpl = node('foo-impl', 'class', 'FooImpl', 'android.foo.FooImpl', 'FooImpl.java', 'java');
+    const barImpl = node('bar-impl', 'class', 'BarImpl', 'android.foo.BarImpl', 'BarImpl.kt', 'kotlin');
+    const unrelated = node('other', 'class', 'Other', 'android.foo.Other', 'Other.java', 'java');
+    const base = context([foo, bar, fooImpl, barImpl, unrelated], {
+      'IFoo.aidl': '', 'IBar.aidl': '',
+      'FooImpl.java': 'class FooImpl implements IFoo {}',
+      'BarImpl.kt': 'class BarImpl:IBar {}',
+      'Other.java': 'class Other {}',
+    });
+    let lineReads = 0;
+    base.getFileLines = (file) => {
+      lineReads++;
+      return base.readFile(file)?.split(/\r?\n/) ?? null;
+    };
+    const edges = aidlBinderSynthesizer.synthesize(base);
+    expect(edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'foo', target: 'foo-impl', kind: 'binds' }),
+      expect.objectContaining({ source: 'bar', target: 'bar-impl', kind: 'binds' }),
+    ]));
+    expect(edges).not.toContainEqual(expect.objectContaining({ target: 'other' }));
+    expect(lineReads).toBe(3);
+  });
+
   it('links Device Tree compatible values to driver probe functions', () => {
     const device = node('dt', 'device', 'uart0', 'board.dts::uart0', 'board.dts', 'devicetree', 'compatible=acme,uart-v2');
     const probe = node('probe', 'function', 'acme_uart_probe', 'acme_uart_probe', 'drivers/uart.c', 'c');
@@ -158,5 +184,43 @@ describe('AOSP cross-language synthesis', () => {
       expect.objectContaining({ source: 'sc', target: 'svc', kind: 'configures' }),
       expect.objectContaining({ source: 'pc', target: 'p', kind: 'configures' }),
     ]));
+  });
+
+  it('keeps protocol bridges silent when their exact evidence does not match', () => {
+    const iface = node('iface', 'interface', 'IFoo', 'android.foo.IFoo', 'IFoo.aidl', 'aidl');
+    const unrelatedImpl = node('impl', 'class', 'FooImpl', 'android.foo.FooImpl', 'FooImpl.java', 'java');
+    expect(aidlBinderSynthesizer.synthesize(context([iface, unrelatedImpl], {
+      'IFoo.aidl': '', 'FooImpl.java': 'class FooImpl implements IBar {}',
+    }))).toEqual([]);
+
+    const device = node('device', 'device', 'uart0', 'board.dts::uart0', 'board.dts', 'devicetree', 'compatible=acme,uart');
+    const probe = node('probe', 'function', 'other_probe', 'other_probe', 'other.c', 'c');
+    const schema = node('schema', 'resource', 'Other', 'schema:other', 'other.yaml', 'yaml', 'Devicetree binding compatible=acme,other');
+    const dtContext = context([device, probe, schema], {
+      'board.dts': 'compatible = "acme,uart";',
+      'other.c': 'static const struct of_device_id ids[] = { { .compatible = "acme,other" } };\nint other_probe(void) {}',
+      'other.yaml': '',
+    });
+    expect(deviceTreeDriverSynthesizer.synthesize(dtContext)).toEqual([]);
+    expect(deviceTreeBindingSynthesizer.synthesize(dtContext)).toEqual([]);
+
+    const service = node('service', 'service', 'demod', 'init:demod', 'init.rc', 'initrc', '/system/bin/demod');
+    const duplicateA = node('target-a', 'build_target', 'demod', 'a:demod', 'a/Android.bp', 'blueprint');
+    const duplicateB = node('target-b', 'build_target', 'demod', 'b:demod', 'b/Android.bp', 'blueprint');
+    expect(initServiceSynthesizer.synthesize(context([service, duplicateA, duplicateB], {
+      'init.rc': '', 'a/Android.bp': '', 'b/Android.bp': '',
+    }))).toEqual([]);
+
+    const instance = node('instance', 'service', 'default', 'android.foo::IFoo/default', 'manifest.xml', 'xml', 'VINTF aidl instance');
+    const wrongIface = node('wrong-iface', 'interface', 'IBar', 'android.foo.IBar', 'IBar.aidl', 'aidl');
+    expect(halVintfSynthesizer.synthesize(context([instance, wrongIface], {
+      'manifest.xml': '', 'IBar.aidl': '',
+    }))).toEqual([]);
+
+    const policy = node('policy', 'resource', 'android.foo.IFoo/default', 'android.foo.IFoo/default', 'service_contexts', 'selinux');
+    const otherService = node('other-service', 'service', 'android.foo.IBar/default', 'android.foo.IBar/default', 'manifest.xml', 'xml');
+    expect(selinuxBindingSynthesizer.synthesize(context([policy, otherService], {
+      service_contexts: '', 'manifest.xml': '',
+    }))).toEqual([]);
   });
 });

@@ -3243,6 +3243,31 @@ int run() {
       }
     });
 
+    it('falls back to global compile_commands dirs when one entry has no project-local includes', () => {
+      const tempProject = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-cpp-test-'));
+      try {
+        fs.mkdirSync(path.join(tempProject, 'src'), { recursive: true });
+        const compileDb = [
+          {
+            directory: tempProject,
+            arguments: ['clang++', '-I/usr/include', '-isystem', '/opt/sdk/include', '-c', 'src/a.cpp'],
+            file: 'src/a.cpp',
+          },
+          {
+            directory: tempProject,
+            arguments: ['clang++', '-Ishared/include', '-c', 'src/b.cpp'],
+            file: 'src/b.cpp',
+          },
+        ];
+        fs.writeFileSync(path.join(tempProject, 'compile_commands.json'), JSON.stringify(compileDb));
+        clearCppIncludeDirCache();
+        expect(loadCppIncludeDirs(tempProject, 'src/a.cpp')).toEqual(['shared/include']);
+        expect(loadCppIncludeDirs(tempProject, 'src/b.cpp')).toEqual(['shared/include']);
+      } finally {
+        fs.rmSync(tempProject, { recursive: true });
+      }
+    });
+
     it('should fall back to heuristic include dirs when no compile_commands.json', () => {
       const tempProject = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-cpp-test-'));
       try {

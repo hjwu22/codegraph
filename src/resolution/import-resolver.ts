@@ -529,13 +529,26 @@ export function clearCppIncludeDirCache(): void {
  */
 export function loadCppIncludeDirs(projectRoot: string, filePath?: string): string[] {
   const cached = cppIncludeDirCache.get(projectRoot);
-  if (cached !== undefined) return filePath && cached.byFile.has(filePath) ? cached.byFile.get(filePath)! : cached.all;
+  if (cached !== undefined) return cppIncludeDirsForFile(cached, filePath);
 
   const index = loadCppIncludeDirsFromCompileDB(projectRoot)
     || { all: loadCppIncludeDirsHeuristic(projectRoot), byFile: new Map<string, string[]>() };
 
   cppIncludeDirCache.set(projectRoot, index);
-  return filePath && index.byFile.has(filePath) ? index.byFile.get(filePath)! : index.all;
+  return cppIncludeDirsForFile(index, filePath);
+}
+
+/**
+ * Prefer a translation unit's exact include search path. An entry that has no
+ * project-local include directories is not authoritative evidence of an empty
+ * search universe: its command may contain only toolchain/system paths while a
+ * generated compile database records shared project headers on another entry.
+ * In that case preserve the pre-scoping global fallback.
+ */
+function cppIncludeDirsForFile(index: CppIncludeDirectoryIndex, filePath?: string): string[] {
+  if (!filePath) return index.all;
+  const scoped = index.byFile.get(filePath);
+  return scoped && scoped.length > 0 ? scoped : index.all;
 }
 
 /**
