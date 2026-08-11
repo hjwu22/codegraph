@@ -229,6 +229,30 @@ describe('AOSP artifact extraction', () => {
     ]));
   });
 
+  it('does not extract AIDL declarations out of comments', () => {
+    // Real AOSP shape: the `aidl_api/` frozen-snapshot header and ordinary doc
+    // comments both contain the word `interface`. AIDL declarations may end in
+    // `;` rather than `{`, so nothing else stops a comment from matching.
+    const result = extractFromSource('android/media/IEco.aidl', `
+      // This file is a snapshot of an AIDL file. Do not edit it manually.
+      // You must not make a backward incompatible change to any AIDL file
+      // built with the aidl_interface module type with versions property set.
+      package android.media;
+
+      /**
+       * Binder interface for ECO (Encoder Camera Optimization) service.
+       * The interface is stable; the parcelable Config below is not.
+       */
+      interface IEco {
+        /* enum Mode is documented elsewhere */
+        void start();
+      }
+    `);
+    const declared = result.nodes.filter((n) => ['interface', 'struct', 'union', 'enum'].includes(n.kind));
+    expect(declared.map((n) => n.name)).toEqual(['IEco']);
+    expect(result.nodes.filter((n) => n.kind === 'method').map((n) => n.name)).toEqual(['start']);
+  });
+
   it('extracts Device Tree nodes, includes, phandles, compatibles, and overlays', () => {
     const result = extractFromSource('arch/arm64/boot/dts/acme.dts', `
       #include "base.dtsi"

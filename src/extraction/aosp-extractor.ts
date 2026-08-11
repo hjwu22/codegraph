@@ -280,33 +280,38 @@ export class AospArtifactExtractor {
     return chars.join('');
   }
 
-  private extractImports(owner: Node, regex: RegExp, kind: ReferenceKind = 'imports'): void {
+  private extractImports(owner: Node, regex: RegExp, kind: ReferenceKind = 'imports', text = this.source): void {
     let match: RegExpExecArray | null;
-    while ((match = regex.exec(this.source)) !== null) {
+    while ((match = regex.exec(text)) !== null) {
       this.addRef(owner, match[1]!, kind, this.lineAt(match.index));
     }
   }
 
   private extractAidl(): void {
-    const pkg = /\bpackage\s+([\w.]+)\s*;/.exec(this.source)?.[1] ?? '';
-    if (pkg) this.addNode('namespace', pkg.split('.').pop()!, pkg, this.lineAt(this.source.indexOf(pkg)));
-    this.extractImports(this.fileNode, /\bimport\s+([\w.]+)\s*;/g);
+    // AIDL declarations are NOT required to be followed by `{` (`parcelable X;`
+    // is legal), so an unmasked scan matches the word `interface` inside doc
+    // comments — "Binder interface for ECO service" yields a bogus `for`
+    // interface. Scan comment-masked text; offsets and line breaks survive.
+    const syntax = this.maskComments(this.source, false);
+    const pkg = /\bpackage\s+([\w.]+)\s*;/.exec(syntax)?.[1] ?? '';
+    if (pkg) this.addNode('namespace', pkg.split('.').pop()!, pkg, this.lineAt(syntax.indexOf(pkg)));
+    this.extractImports(this.fileNode, /\bimport\s+([\w.]+)\s*;/g, 'imports', syntax);
 
     const declarations = /(?:@[\w().,="'\s]+\s+)*(?:oneway\s+)?(interface|parcelable|union|enum)\s+(\w+)(?:\s+extends\s+([\w.]+))?/g;
     let m: RegExpExecArray | null;
-    while ((m = declarations.exec(this.source)) !== null) {
+    while ((m = declarations.exec(syntax)) !== null) {
       const keyword = m[1]!;
       const name = m[2]!;
       const kind: NodeKind = keyword === 'interface' ? 'interface' : keyword === 'enum' ? 'enum' : keyword === 'union' ? 'union' : 'struct';
       const qn = pkg ? `${pkg}.${name}` : name;
-      const openCandidate = this.source.indexOf('{', m.index + m[0].length);
-      const semicolon = this.source.indexOf(';', m.index + m[0].length);
+      const openCandidate = syntax.indexOf('{', m.index + m[0].length);
+      const semicolon = syntax.indexOf(';', m.index + m[0].length);
       const open = openCandidate >= 0 && (semicolon < 0 || openCandidate < semicolon) ? openCandidate : -1;
       const end = open >= 0 ? this.braceEnd(open) : semicolon >= 0 ? semicolon : m.index + m[0].length;
       const node = this.addNode(kind, name, qn, this.lineAt(m.index), this.lineAt(end), keyword);
       if (m[3]) this.addRef(node, m[3], 'extends', this.lineAt(m.index));
       if (keyword !== 'interface' || open < 0) continue;
-      const body = this.source.slice(open + 1, end);
+      const body = syntax.slice(open + 1, end);
       const methodRe = /(?:oneway\s+)?([\w.<>\[\]?]+)\s+(\w+)\s*\(([^;{}]*)\)\s*(?:throws\s+[\w.,\s]+)?;/g;
       let mm: RegExpExecArray | null;
       while ((mm = methodRe.exec(body)) !== null) {
@@ -587,20 +592,23 @@ export class AospArtifactExtractor {
   }
 
   private extractHidl(): void {
-    const pkg = /\bpackage\s+([\w.]+)@([\d.]+)\s*;/.exec(this.source);
+    // Same comment hazard as AIDL; the trailing `{` currently masks it, so this
+    // is defence in depth rather than an observed defect.
+    const syntax = this.maskComments(this.source, false);
+    const pkg = /\bpackage\s+([\w.]+)@([\d.]+)\s*;/.exec(syntax);
     const prefix = pkg ? `${pkg[1]}@${pkg[2]}` : '';
-    this.extractImports(this.fileNode, /\bimport\s+([\w.]+@[\d.]+(?:::\w+)?)\s*;/g);
+    this.extractImports(this.fileNode, /\bimport\s+([\w.]+@[\d.]+(?:::\w+)?)\s*;/g, 'imports', syntax);
     const declRe = /\b(interface|struct|union|enum)\s+(\w+)(?:\s+extends\s+([\w.@:]+))?\s*\{/g;
     let m: RegExpExecArray | null;
-    while ((m = declRe.exec(this.source)) !== null) {
+    while ((m = declRe.exec(syntax)) !== null) {
       const kind: NodeKind = m[1] === 'interface' ? 'interface' : m[1] === 'struct' ? 'struct' : m[1] === 'union' ? 'union' : 'enum';
       const qn = prefix ? `${prefix}::${m[2]}` : m[2]!;
-      const open = this.source.indexOf('{', m.index);
+      const open = syntax.indexOf('{', m.index);
       const end = this.braceEnd(open);
       const node = this.addNode(kind, m[2]!, qn, this.lineAt(m.index), this.lineAt(end), m[1]);
       if (m[3]) this.addRef(node, m[3], 'extends', this.lineAt(m.index));
       if (kind === 'interface') {
-        const body = this.source.slice(open + 1, end);
+        const body = syntax.slice(open + 1, end);
         for (const mm of body.matchAll(/\b(\w+)\s*\(([^)]*)\)\s*(?:generates\s*\(([^)]*)\))?\s*;/g)) {
           this.addNode('method', mm[1]!, `${qn}::${mm[1]}`, this.lineAt(open + 1 + mm.index!), this.lineAt(open + 1 + mm.index!), `${mm[1]}(${mm[2]})${mm[3] ? ` generates (${mm[3]})` : ''}`, node);
         }
@@ -610,18 +618,19 @@ export class AospArtifactExtractor {
   }
 
   private extractProto(): void {
-    const pkg = /\bpackage\s+([\w.]+)\s*;/.exec(this.source)?.[1] ?? '';
-    this.extractImports(this.fileNode, /\bimport\s+(?:public\s+|weak\s+)?["']([^"']+)["']\s*;/g);
+    const syntax = this.maskComments(this.source, false);
+    const pkg = /\bpackage\s+([\w.]+)\s*;/.exec(syntax)?.[1] ?? '';
+    this.extractImports(this.fileNode, /\bimport\s+(?:public\s+|weak\s+)?["']([^"']+)["']\s*;/g, 'imports', syntax);
     const declRe = /\b(message|enum|service)\s+(\w+)\s*\{/g;
     let m: RegExpExecArray | null;
-    while ((m = declRe.exec(this.source)) !== null) {
+    while ((m = declRe.exec(syntax)) !== null) {
       const kind: NodeKind = m[1] === 'message' ? 'struct' : m[1] === 'service' ? 'interface' : 'enum';
       const qn = pkg ? `${pkg}.${m[2]}` : m[2]!;
-      const open = this.source.indexOf('{', m.index);
+      const open = syntax.indexOf('{', m.index);
       const end = this.braceEnd(open);
       const node = this.addNode(kind, m[2]!, qn, this.lineAt(m.index), this.lineAt(end), m[1]);
       if (m[1] === 'service') {
-        const body = this.source.slice(open + 1, end);
+        const body = syntax.slice(open + 1, end);
         for (const rpc of body.matchAll(/\brpc\s+(\w+)\s*\(([^)]*)\)\s+returns\s*\(([^)]*)\)/g)) {
           const method = this.addNode('method', rpc[1]!, `${qn}::${rpc[1]}`, this.lineAt(open + 1 + rpc.index!), this.lineAt(open + 1 + rpc.index!), `rpc ${rpc[1]}(${rpc[2]}) returns (${rpc[3]})`, node);
           this.addRef(method, rpc[2]!, 'references', method.startLine);
