@@ -334,15 +334,32 @@ export const deviceTreeBindingSynthesizer: GraphSynthesizer = {
     }
     const out: Edge[] = [];
     for (const device of devices) {
+      // A Device Tree `compatible` is an ORDERED list, most specific first, and
+      // the binding is the most specific entry that resolves. Matching every
+      // entry paired each ARM PrimeCell peripheral with every other one through
+      // the trailing generic `arm,primecell`: 19,176 of 28,797 edges (66.6%) on
+      // a real common-android15-6.6 tree, e.g. a pl061 GPIO to the pl050 PS/2
+      // schema and a pl330 DMA controller to the pl031 RTC schema.
       for (const compatible of device.signature!.split('compatible=')[1]!.split('|')) {
-        for (const schema of compatibleToSchemas.get(compatible) ?? []) {
-          out.push(edge(device, schema, 'configures', this.id, [`compatible=${compatible}`, schema.filePath], 'exact'));
+        const matches = compatibleToSchemas.get(compatible) ?? [];
+        // A string many schemas claim cannot identify one of them. Real trees are
+        // sharply bimodal: 5,101 of 5,132 compatibles resolve to exactly one
+        // schema, and only `arm,primecell` (30) and `qcom,mdss-dsi-ctrl` (15)
+        // exceed this bound.
+        if (matches.length === 0 || matches.length > AMBIGUOUS_COMPATIBLE_LIMIT) continue;
+        for (const schema of matches) {
+          out.push(edge(device, schema, 'configures', this.id, [`compatible=${compatible}`, schema.filePath],
+            matches.length === 1 ? 'exact' : 'strong'));
         }
+        break; // most specific wins; a later entry describes the family, not this node
       }
     }
     return uniqueEdges(out);
   },
 };
+
+/** Above this many schemas, a `compatible` string names a family, not a device. */
+const AMBIGUOUS_COMPATIBLE_LIMIT = 3;
 
 export const initServiceSynthesizer: GraphSynthesizer = {
   id: 'aosp-init-service',

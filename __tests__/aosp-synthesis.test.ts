@@ -158,6 +158,27 @@ describe('AOSP cross-language synthesis', () => {
     expect(edges).toContainEqual(expect.objectContaining({ source: 'dt', target: 'schema', kind: 'configures' }));
   });
 
+  it('binds a Device Tree node by its most specific compatible only', () => {
+    // Real kernel shape: `compatible = "arm,pl061", "arm,primecell"` — the first
+    // entry names the device, the trailing one names the bus family that dozens
+    // of unrelated peripherals also carry.
+    const gpio = node('gpio', 'device', 'gpio15', 'board.dts::gpio15', 'board.dts', 'devicetree', 'compatible=arm,pl061|arm,primecell');
+    const pl061 = node('s061', 'resource', 'PL061 GPIO', 'schema:pl061', 'bindings/gpio/arm,pl061.yaml', 'yaml', 'Devicetree binding compatible=arm,pl061|arm,primecell');
+    const pl050 = node('s050', 'resource', 'PL050 PS/2', 'schema:pl050', 'bindings/serio/arm,pl050.yaml', 'yaml', 'Devicetree binding compatible=arm,pl050|arm,primecell');
+    const pl031 = node('s031', 'resource', 'PL031 RTC', 'schema:pl031', 'bindings/rtc/arm,pl031.yaml', 'yaml', 'Devicetree binding compatible=arm,pl031|arm,primecell');
+    const pl330 = node('s330', 'resource', 'PL330 DMA', 'schema:pl330', 'bindings/dma/arm,pl330.yaml', 'yaml', 'Devicetree binding compatible=arm,pl330|arm,primecell');
+    const files = Object.fromEntries([gpio, pl061, pl050, pl031, pl330].map((n) => [n.filePath, '']));
+    const edges = deviceTreeBindingSynthesizer.synthesize(context([gpio, pl061, pl050, pl031, pl330], files));
+    expect(edges).toEqual([expect.objectContaining({ source: 'gpio', target: 's061', kind: 'configures' })]);
+  });
+
+  it('falls through to the next compatible when the most specific has no schema', () => {
+    const device = node('dt', 'device', 'uart0', 'board.dts::uart0', 'board.dts', 'devicetree', 'compatible=acme,sm8250-uart|acme,geni-uart');
+    const family = node('schema', 'resource', 'Acme GENI UART', 'schema:geni', 'bindings/serial/acme,geni-uart.yaml', 'yaml', 'Devicetree binding compatible=acme,geni-uart');
+    const edges = deviceTreeBindingSynthesizer.synthesize(context([device, family], { 'board.dts': '', [family.filePath]: '' }));
+    expect(edges).toEqual([expect.objectContaining({ source: 'dt', target: 'schema', kind: 'configures' })]);
+  });
+
   it('links init services to a uniquely named build target', () => {
     const service = node('svc', 'service', 'demod', 'init:demod', 'init.rc', 'initrc', '/system/bin/demod --foreground');
     const target = node('target', 'build_target', 'demod', 'demod', 'Android.bp', 'blueprint', 'cc_binary');
