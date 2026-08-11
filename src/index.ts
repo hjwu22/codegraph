@@ -6,6 +6,7 @@
  */
 
 import * as path from 'path';
+import * as fs from 'fs';
 import {
   Node,
   NodeKind,
@@ -57,6 +58,9 @@ import { CodeGraphPackageVersion } from './mcp/version';
 import { segmentLookupVariants, splitIdentifierSegments } from './search/identifier-segments';
 import { createYielder } from './resolution/cooperative-yield';
 import { minRefsForPool } from './resolution/resolver-pool';
+import { BazelQueryBuildGraphProvider, KernelConfigProvider, ModuleInfoBuildGraphProvider } from './aosp/build-graph';
+import { loadAospProjectConfig } from './project-config';
+import { generateNodeId } from './extraction/tree-sitter-helpers';
 
 // Re-export types for consumers
 export * from './types';
@@ -92,6 +96,23 @@ export {
 export { Mutex, FileLock, processInBatches, debounce, throttle, MemoryMonitor } from './utils';
 export { FileWatcher, WatchOptions, PendingFile, LockUnavailableError } from './sync';
 export { MCPServer } from './mcp';
+export {
+  AospBuildGraph,
+  BazelQueryBuildGraphProvider,
+  KernelConfigProvider,
+  ModuleInfoBuildGraphProvider,
+  StaticExtractionBuildGraphProvider,
+  mergeBuildTargets,
+} from './aosp/build-graph';
+export type {
+  AospBuildSystem,
+  AospExtractionRecord,
+  BuildFileRef,
+  BuildGraphProvider,
+  BuildTarget,
+  SelectedKernelConfig,
+  VariantConstraint,
+} from './aosp/build-graph';
 
 /**
  * Options for initializing a new CodeGraph project
@@ -113,6 +134,25 @@ export interface OpenOptions {
 
   /** Whether to run in read-only mode */
   readOnly?: boolean;
+}
+
+export interface AospEnrichOptions {
+  product?: string;
+  moduleInfo?: string;
+  outDir?: string;
+  bazelQuery?: string;
+  kernelConfig?: string;
+}
+
+export interface AospEnrichResult {
+  moduleInfoPath: string | null;
+  bazelQueryPath: string | null;
+  kernelConfigPath: string | null;
+  product: string | null;
+  targetsImported: number;
+  configsImported: number;
+  nodesCreated: number;
+  edgesCreated: number;
 }
 
 /**
@@ -1536,6 +1576,159 @@ export class CodeGraph {
    */
   getOutgoingEdges(nodeId: string): Edge[] {
     return this.queries.getOutgoingEdges(nodeId);
+  }
+
+  /**
+   * Import existing product module-info and/or captured Bazel query metadata.
+   * This is intentionally metadata-only: it never invokes Soong, Kati, `m`, or any
+   * other build command.
+   */
+  enrichAosp(options: AospEnrichOptions = {}): AospEnrichResult {
+    const config = loadAospProjectConfig(this.projectRoot);
+    if (config.enabled === false) {
+      throw new Error('AOSP profile/enrichment is disabled by codegraph.json (aosp.enabled=false).');
+    }
+    if (config.buildGraph === 'static') {
+      throw new Error('AOSP authoritative enrichment is disabled by codegraph.json (aosp.buildGraph="static"). Use "hybrid" or "authoritative" to import existing metadata.');
+    }
+    const outDir = options.outDir ?? config.outDir;
+    const configured = options.moduleInfo ?? config.moduleInfo;
+    const moduleInfoCandidate = path.resolve(this.projectRoot, configured ?? path.join(outDir, 'module-info.json'));
+    const moduleInfoPath = fs.existsSync(moduleInfoCandidate) ? moduleInfoCandidate : null;
+    const configuredBazel = options.bazelQuery ?? config.bazelQuery;
+    const bazelQueryCandidate = configuredBazel ? path.resolve(this.projectRoot, configuredBazel) : null;
+    const bazelQueryPath = bazelQueryCandidate && fs.existsSync(bazelQueryCandidate) ? bazelQueryCandidate : null;
+    const configuredKernel = options.kernelConfig ?? config.kernelConfig;
+    const kernelConfigCandidate = configuredKernel ? path.resolve(this.projectRoot, configuredKernel) : null;
+    const kernelConfigPath = kernelConfigCandidate && fs.existsSync(kernelConfigCandidate) ? kernelConfigCandidate : null;
+    if (!moduleInfoPath && !bazelQueryPath && !kernelConfigPath) {
+      throw new Error(`AOSP metadata not found (checked ${moduleInfoCandidate}${bazelQueryCandidate ? `, ${bazelQueryCandidate}` : ''}${kernelConfigCandidate ? `, and ${kernelConfigCandidate}` : ''}). Build metadata separately and pass --module-info, --bazel-query, or --kernel-config; CodeGraph will not run a build automatically.`);
+    }
+    const product = options.product ?? config.product ?? undefined;
+    const targets = [
+      ...(moduleInfoPath ? new ModuleInfoBuildGraphProvider(moduleInfoPath, product).discover() : []),
+      ...(bazelQueryPath ? new BazelQueryBuildGraphProvider(bazelQueryPath).discover() : []),
+    ];
+    const before = this.queries.getNodeAndEdgeCount();
+    const targetNodes = new Map<string, Node>();
+    const targetAliases = new Map<string, Node[]>();
+    const generatedNodes: Node[] = [];
+    const edges: Edge[] = [];
+    const now = Date.now();
+
+    for (const target of targets) {
+      const metadataPath = String(target.metadata.bazelQueryPath ?? target.metadata.moduleInfoPath ?? moduleInfoPath ?? bazelQueryPath);
+      const relativeMetadataPath = path.relative(this.projectRoot, metadataPath).replace(/\\/g, '/');
+      const synthesizer = target.system === 'bazel' || target.system === 'kleaf' ? 'aosp-bazel-query' : 'aosp-module-info';
+      const existing = config.buildGraph === 'authoritative'
+        ? []
+        : this.queries.getNodesByName(target.name).filter((n) => n.kind === 'build_target');
+      const chosen = existing.find((n) => !target.packagePath || n.filePath.startsWith(target.packagePath + '/') || path.posix.dirname(n.filePath) === target.packagePath)
+        ?? (existing.length === 1 ? existing[0] : undefined);
+      const node: Node = chosen ?? {
+        id: generateNodeId(relativeMetadataPath, 'build_target', target.id, 1),
+        kind: 'build_target',
+        name: target.name,
+        qualifiedName: target.id,
+        filePath: relativeMetadataPath,
+        language: target.system === 'bazel' || target.system === 'kleaf' ? 'starlark' : 'blueprint',
+        startLine: 1,
+        endLine: 1,
+        startColumn: 0,
+        endColumn: 0,
+        signature: `${target.targetType}${product ? ` [${product}]` : ''}`,
+        updatedAt: now,
+      };
+      if (!chosen) this.queries.insertNode(node);
+      targetNodes.set(target.id, node);
+      for (const alias of [target.name, typeof target.metadata.label === 'string' ? target.metadata.label : null]) {
+        if (alias) targetAliases.set(alias, [...(targetAliases.get(alias) ?? []), node]);
+      }
+
+      for (const output of target.generatedOutputs) {
+        const outputNode: Node = {
+          id: generateNodeId(relativeMetadataPath, 'resource', `${target.id}:${output.path}`, 1),
+          kind: 'resource', name: path.basename(output.path), qualifiedName: output.path,
+          filePath: relativeMetadataPath,
+          language: target.system === 'bazel' || target.system === 'kleaf' ? 'starlark' : 'blueprint',
+          startLine: 1, endLine: 1,
+          startColumn: 0, endColumn: 0, signature: 'authoritative generated output', updatedAt: now,
+        };
+        generatedNodes.push(outputNode);
+        edges.push({ source: node.id, target: outputNode.id, kind: 'generates', provenance: 'heuristic', metadata: {
+          synthesizedBy: synthesizer, evidence: [metadataPath, target.name], confidence: 'exact', product: product ?? null,
+        } });
+      }
+    }
+    if (generatedNodes.length > 0) this.queries.insertNodes(generatedNodes);
+
+    for (const target of targets) {
+      const source = targetNodes.get(target.id);
+      if (!source) continue;
+      for (const dependency of target.dependencies) {
+        const aliased = targetAliases.get(dependency) ?? [];
+        const candidates = aliased.length > 0
+          ? aliased
+          : this.queries.getNodesByName(dependency).filter((n) => n.kind === 'build_target');
+        if (candidates.length !== 1) continue;
+        const metadataPath = String(target.metadata.bazelQueryPath ?? target.metadata.moduleInfoPath ?? moduleInfoPath ?? bazelQueryPath);
+        const synthesizer = target.system === 'bazel' || target.system === 'kleaf' ? 'aosp-bazel-query' : 'aosp-module-info';
+        edges.push({ source: source.id, target: candidates[0]!.id, kind: 'depends_on', provenance: 'heuristic', metadata: {
+          synthesizedBy: synthesizer, evidence: [metadataPath, `${target.name} -> ${dependency}`], confidence: 'exact', product: product ?? null,
+        } });
+      }
+      const testConfigs = Array.isArray(target.metadata.testConfig)
+        ? target.metadata.testConfig.filter((value): value is string => typeof value === 'string')
+        : [];
+      for (const testConfig of testConfigs) {
+        const configTargets = this.queries.getNodesByFile(testConfig).filter((node) => node.kind === 'build_target');
+        if (configTargets.length !== 1) continue;
+        const metadataPath = String(target.metadata.moduleInfoPath ?? moduleInfoPath);
+        edges.push({ source: source.id, target: configTargets[0]!.id, kind: 'configures', provenance: 'heuristic', metadata: {
+          synthesizedBy: 'aosp-module-info', evidence: [metadataPath, `test_config=${testConfig}`], confidence: 'exact', product: product ?? null,
+        } });
+        edges.push({ source: configTargets[0]!.id, target: source.id, kind: 'depends_on', provenance: 'heuristic', metadata: {
+          synthesizedBy: 'aosp-module-info-test-impact', evidence: [metadataPath, `test_config=${testConfig}`], confidence: 'exact', product: product ?? null,
+        } });
+      }
+    }
+    if (edges.length > 0) this.queries.insertEdges(edges);
+
+    const selectedConfigs = kernelConfigPath ? new KernelConfigProvider(kernelConfigPath).discover() : [];
+    if (kernelConfigPath && selectedConfigs.length > 0) {
+      const relativeConfigPath = path.relative(this.projectRoot, kernelConfigPath).replace(/\\/g, '/');
+      const selectedNodes: Node[] = [];
+      const configEdges: Edge[] = [];
+      for (const selected of selectedConfigs) {
+        const selectedNode: Node = {
+          id: generateNodeId(relativeConfigPath, 'constant', `selected:${selected.symbol}`, 1),
+          kind: 'constant', name: selected.symbol, qualifiedName: `selected:${selected.symbol}`,
+          filePath: relativeConfigPath, language: 'kconfig', startLine: 1, endLine: 1,
+          startColumn: 0, endColumn: 0, signature: `${selected.symbol}=${selected.value}`,
+          updatedAt: now,
+        };
+        selectedNodes.push(selectedNode);
+        const definitions = this.queries.getNodesByQualifiedNameExact(selected.symbol)
+          .filter((node) => node.kind === 'constant' && node.language === 'kconfig');
+        if (definitions.length === 1) configEdges.push({
+          source: selectedNode.id, target: definitions[0]!.id, kind: 'configures', provenance: 'heuristic',
+          metadata: { synthesizedBy: 'aosp-kernel-config', evidence: [kernelConfigPath, `${selected.symbol}=${selected.value}`], confidence: 'exact', enabled: selected.enabled },
+        });
+      }
+      this.queries.insertNodes(selectedNodes);
+      if (configEdges.length > 0) this.queries.insertEdges(configEdges);
+    }
+    const after = this.queries.getNodeAndEdgeCount();
+    return {
+      moduleInfoPath,
+      bazelQueryPath,
+      kernelConfigPath,
+      product: product ?? null,
+      targetsImported: targets.length,
+      configsImported: selectedConfigs.length,
+      nodesCreated: after.nodes - before.nodes,
+      edgesCreated: after.edges - before.edges,
+    };
   }
 
   /**

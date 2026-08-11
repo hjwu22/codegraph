@@ -1,0 +1,13 @@
+/dts-v1/;
+
+#include "base.dtsi"
+
+/ {
+    compatible = "acme,board-v1";
+
+    uart0: serial@1000 {
+        compatible = "acme,uart-v2";
+        clocks = <&clk0>;
+        status = "okay";
+    };
+};

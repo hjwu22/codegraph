@@ -16,6 +16,11 @@ import {
   UnresolvedReference,
 } from '../types';
 import { getParser, detectLanguage, isLanguageSupported, isFileLevelOnlyLanguage } from './grammars';
+import { AOSP_CUSTOM_LANGUAGES } from './grammars';
+import { AospArtifactExtractor } from './aosp-extractor';
+import { AndroidXmlExtractor, isAndroidSemanticXml } from './android-xml-extractor';
+import { AospMetadataExtractor } from './aosp-metadata-extractor';
+import { isAospTestMapping, isDeviceTreeBindingYaml } from './aosp-artifacts';
 import { generateNodeId, getNodeText, getChildByField, getPrecedingDocstring } from './tree-sitter-helpers';
 import { FN_REF_SPECS, captureFnRefCandidates, type FnRefSpec, type FnRefCandidate } from './function-ref';
 import { isGeneratedFile } from './generated-detection';
@@ -6692,8 +6697,18 @@ export function extractFromSource(
 
   let result: ExtractionResult;
 
+  // AOSP build/configuration DSLs use tolerant, non-evaluating extractors.
+  // This runs before the WASM route because these languages deliberately do
+  // not execute Soong/Make/Starlark/dtc/m4 as part of indexing.
+  if (isAospTestMapping(filePath)) {
+    result = new AospMetadataExtractor(filePath, source, 'test-mapping').extract();
+  } else if (isDeviceTreeBindingYaml(filePath, source)) {
+    result = new AospMetadataExtractor(filePath, source, 'dt-binding').extract();
+  } else if (AOSP_CUSTOM_LANGUAGES.has(detectedLanguage)) {
+    const extractor = new AospArtifactExtractor(filePath, source, detectedLanguage);
+    result = extractor.extract();
   // Use custom extractor for Svelte
-  if (detectedLanguage === 'svelte') {
+  } else if (detectedLanguage === 'svelte') {
     const extractor = new SvelteExtractor(filePath, source);
     result = extractor.extract();
   } else if (detectedLanguage === 'vue') {
@@ -6711,6 +6726,9 @@ export function extractFromSource(
   } else if (detectedLanguage === 'razor') {
     // Use custom extractor for ASP.NET Razor (.cshtml) / Blazor (.razor) markup
     const extractor = new RazorExtractor(filePath, source);
+    result = extractor.extract();
+  } else if (detectedLanguage === 'xml' && isAndroidSemanticXml(filePath, source)) {
+    const extractor = new AndroidXmlExtractor(filePath, source);
     result = extractor.extract();
   } else if (detectedLanguage === 'xml') {
     // Custom extractor for MyBatis mapper XML. Non-mapper XML returns just a

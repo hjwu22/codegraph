@@ -10,8 +10,15 @@ import * as path from 'path';
 import * as fsp from 'fs/promises';
 import { Parser, Language as WasmLanguage } from 'web-tree-sitter';
 import { Language } from '../types';
+import { detectAospArtifactLanguage, isAospArtifactFile } from './aosp-artifacts';
 
-export type GrammarLanguage = Exclude<Language, 'svelte' | 'vue' | 'astro' | 'liquid' | 'razor' | 'yaml' | 'twig' | 'xml' | 'properties' | 'unknown'>;
+export type GrammarLanguage = Exclude<Language,
+  | 'svelte' | 'vue' | 'astro' | 'liquid' | 'razor'
+  | 'yaml' | 'twig' | 'xml' | 'properties'
+  | 'aidl' | 'blueprint' | 'make' | 'hidl'
+  | 'protobuf' | 'initrc' | 'sysprop' | 'selinux' | 'kconfig'
+  | 'unknown'
+>;
 
 /**
  * WASM filename map — maps each language to its .wasm grammar file
@@ -50,6 +57,8 @@ const WASM_GRAMMAR_FILES: Record<GrammarLanguage, string> = {
   terraform: 'tree-sitter-terraform.wasm',
   arkts: 'tree-sitter-arkts.wasm',
   nix: 'tree-sitter-nix.wasm',
+  starlark: 'tree-sitter-starlark.wasm',
+  devicetree: 'tree-sitter-devicetree.wasm',
 };
 
 /**
@@ -170,6 +179,20 @@ export const EXTENSION_MAP: Record<string, Language> = {
   '.tf': 'terraform',
   '.tfvars': 'terraform',
   '.tofu': 'terraform',
+  // Android Open Source Project languages and configuration DSLs.
+  '.aidl': 'aidl',
+  '.bp': 'blueprint',
+  '.bzl': 'starlark',
+  '.dts': 'devicetree',
+  '.dtsi': 'devicetree',
+  '.mk': 'make',
+  '.hal': 'hidl',
+  '.proto': 'protobuf',
+  '.rc': 'initrc',
+  '.sysprop': 'sysprop',
+  '.te': 'selinux',
+  '.cil': 'selinux',
+  '.fc': 'selinux',
 };
 
 /**
@@ -182,6 +205,7 @@ export const EXTENSION_MAP: Record<string, Language> = {
  * to the built-ins. Omitting it is byte-identical to the zero-config behavior.
  */
 export function isSourceFile(filePath: string, overrides?: Record<string, Language>): boolean {
+  if (isAospArtifactFile(filePath)) return true;
   if (isPlayRoutesFile(filePath)) return true; // Play `conf/routes` is extensionless
   if (isShopifyLiquidJson(filePath)) return true; // Shopify OS 2.0 JSON templates / section groups
   if (isErlangAppFile(filePath)) return true; // OTP `.app`/`.app.src` resource files
@@ -338,6 +362,10 @@ const VENDORED_WASM_LANGS: ReadonlySet<GrammarLanguage> = new Set([
   // kernel compiles the same-commit vendored C (codegraph-kernel/grammars/
   // dart); crates.io tree-sitter-dart is a different-lineage fork (rejected).
   'dart',
+  // AOSP configuration grammars health-checked under web-tree-sitter 0.25:
+  // tree-sitter-starlark 1.3.0 (ABI 14) and tree-sitter-devicetree 0.15.0
+  // (ABI 15), both copied byte-for-byte from their npm package artifacts.
+  'starlark', 'devicetree',
 ]);
 
 /** Absolute path of a language's grammar WASM (vendored or tree-sitter-wasms). */
@@ -475,6 +503,8 @@ export function getParser(language: Language): Parser | null {
  * `EXTENSION_MAP`. Omitting it is byte-identical to the zero-config behavior.
  */
 export function detectLanguage(filePath: string, source?: string, overrides?: Record<string, Language>): Language {
+  const aospArtifactLanguage = detectAospArtifactLanguage(filePath);
+  if (aospArtifactLanguage) return aospArtifactLanguage;
   // Play `conf/routes` has no grammar — route through the no-symbol path; the
   // Play framework resolver extracts route nodes from it.
   if (isPlayRoutesFile(filePath)) return 'yaml';
@@ -527,6 +557,7 @@ function looksLikeObjc(source: string): boolean {
  * Returns true if the grammar exists, even if not yet loaded.
  */
 export function isLanguageSupported(language: Language): boolean {
+  if (AOSP_CUSTOM_LANGUAGES.has(language)) return true;
   if (language === 'svelte') return true; // custom extractor (script block delegation)
   if (language === 'vue') return true; // custom extractor (script block delegation)
   if (language === 'astro') return true; // custom extractor (frontmatter/script block delegation)
@@ -544,6 +575,7 @@ export function isLanguageSupported(language: Language): boolean {
  * Check if a grammar has been loaded and is ready for parsing.
  */
 export function isGrammarLoaded(language: Language): boolean {
+  if (AOSP_CUSTOM_LANGUAGES.has(language) && language !== 'starlark' && language !== 'devicetree') return true;
   if (language === 'svelte' || language === 'vue' || language === 'astro' || language === 'liquid' || language === 'razor') return true;
   if (language === 'yaml' || language === 'twig') return true; // no WASM grammar needed
   if (language === 'xml' || language === 'properties') return true; // no WASM grammar needed
@@ -567,7 +599,11 @@ export function isFileLevelOnlyLanguage(language: Language): boolean {
  * Get all supported languages (those with grammar definitions).
  */
 export function getSupportedLanguages(): Language[] {
-  return [...(Object.keys(WASM_GRAMMAR_FILES) as GrammarLanguage[]), 'svelte', 'vue', 'astro', 'liquid'];
+  return [...new Set<Language>([
+    ...(Object.keys(WASM_GRAMMAR_FILES) as GrammarLanguage[]),
+    'svelte', 'vue', 'astro', 'liquid',
+    ...AOSP_CUSTOM_LANGUAGES,
+  ])];
 }
 
 /**
@@ -655,7 +691,24 @@ export function getLanguageDisplayName(language: Language): string {
     erlang: 'Erlang',
     terraform: 'Terraform',
     arkts: 'ArkTS',
+    aidl: 'AIDL',
+    blueprint: 'Android Blueprint',
+    starlark: 'Starlark/Bazel',
+    devicetree: 'Device Tree',
+    make: 'Android Make',
+    hidl: 'HIDL',
+    protobuf: 'Protocol Buffers',
+    initrc: 'Android init',
+    sysprop: 'Android sysprop',
+    selinux: 'SELinux policy',
+    kconfig: 'Kconfig/Kbuild',
     unknown: 'Unknown',
   };
   return names[language] || language;
 }
+
+/** AOSP DSLs handled by dedicated tolerant extractors, without a WASM grammar. */
+export const AOSP_CUSTOM_LANGUAGES: ReadonlySet<Language> = new Set([
+  'aidl', 'blueprint', 'starlark', 'devicetree', 'make', 'hidl',
+  'protobuf', 'initrc', 'sysprop', 'selinux', 'kconfig',
+]);

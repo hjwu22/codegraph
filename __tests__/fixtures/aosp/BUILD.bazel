@@ -1,0 +1,9 @@
+load("//build/kernel/kleaf:kernel.bzl", "kernel_build")
+
+kernel_build(
+    name = "kernel_aarch64",
+    srcs = glob(["**/*.c"]),
+    deps = select({
+        "//conditions:default": ["//common:headers"],
+    }),
+)

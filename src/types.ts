@@ -43,6 +43,12 @@ export const NODE_KINDS = [
   'route',
   'component',
   'union',
+  // AOSP/build-system graph primitives. Keep append-only: the native kernel
+  // transports kinds by their array index.
+  'build_target',
+  'service',
+  'resource',
+  'device',
 ] as const;
 
 export type NodeKind = (typeof NODE_KINDS)[number];
@@ -67,6 +73,12 @@ export const EDGE_KINDS = [
   'instantiates',    // Creates instance of class
   'overrides',       // Method overrides parent method
   'decorates',       // Decorator applied to symbol
+  // Build/configuration relationships shared by AOSP's mixed build systems.
+  'depends_on',      // Build/config target depends on another target
+  'generates',       // Build target produces a generated/virtual artifact
+  'binds',           // Runtime/config declaration binds to an implementation
+  'configures',      // Configuration or policy controls a target
+  'overlays',        // Overlay replaces/augments another resource/device node
 ] as const;
 
 export type EdgeKind = (typeof EDGE_KINDS)[number];
@@ -117,6 +129,20 @@ export const LANGUAGES = [
   'vbnet',
   'erlang',
   'terraform',
+  // Android Open Source Project languages and configuration DSLs. Most are
+  // handled by dedicated tolerant extractors rather than the programming-
+  // language Tree-sitter pipeline.
+  'aidl',
+  'blueprint',
+  'starlark',
+  'devicetree',
+  'make',
+  'hidl',
+  'protobuf',
+  'initrc',
+  'sysprop',
+  'selinux',
+  'kconfig',
   'unknown',
 ] as const;
 

@@ -27,7 +27,8 @@ import { StoreWriter, StoreBundle, finalizeStoreBundle } from './store-writer';
 import { materializeKernelResult } from './kernel';
 import { detectGeneratedFile } from './generated-detection';
 import { detectLanguage, isSourceFile, isLanguageSupported, isFileLevelOnlyLanguage, initGrammars, loadGrammarsForLanguages, readGrammarWasmBytes } from './grammars';
-import { loadExtensionOverrides, loadIncludeIgnoredPatterns, loadExcludePatterns, loadIncludePatterns } from '../project-config';
+import { loadExtensionOverrides, loadIncludeIgnoredPatterns, loadExcludePatterns, loadIncludePatterns, loadAospProjectConfig } from '../project-config';
+import { isAospWorkspace } from './aosp-artifacts';
 import { isCodeGraphDataDir } from '../directory';
 import { logDebug, logWarn } from '../errors';
 import { validatePathWithinRoot, normalizePath } from '../utils';
@@ -170,6 +171,8 @@ const DEFAULT_IGNORE_DIRS: ReadonlySet<string> = new Set([
   '.vercel', '.netlify', '.wrangler',
   // Build output (common across ecosystems)
   'dist', 'build', 'out', '.output',
+  // Android repo tool metadata/object store — workspace topology, not source.
+  '.repo',
   // Test / coverage
   'coverage', '.nyc_output',
   // Python
@@ -220,14 +223,34 @@ const ANDROID_RES_TYPES: readonly string[] = [
 ];
 
 /** Gitignore-style patterns for the `ignore` matcher: the dirs above plus a few globs. */
+const ANDROID_RESOURCE_IGNORE_PATTERNS = ANDROID_RES_TYPES.map((t) => `**/res/${t}*/`);
+
 const DEFAULT_IGNORE_PATTERNS: string[] = [
   ...Array.from(DEFAULT_IGNORE_DIRS, (d) => `${d}/`),
   '*.egg-info/',     // Python packaging metadata
   'cmake-build-*/',  // CLion / CMake build trees
   'bazel-*/',        // Bazel output symlink trees
   // Android resource dirs at any depth, with their qualifier variants (#1047).
-  ...ANDROID_RES_TYPES.map((t) => `**/res/${t}*/`),
+  ...ANDROID_RESOURCE_IGNORE_PATTERNS,
 ];
+
+function defaultIgnorePatterns(rootDir?: string): string[] {
+  if (!rootDir) return DEFAULT_IGNORE_PATTERNS;
+  const config = loadAospProjectConfig(rootDir);
+  const profileEnabled = config.enabled === true || (config.enabled === 'auto' && isAospWorkspace(rootDir));
+  if (!profileEnabled || !config.indexAndroidResources) {
+    return DEFAULT_IGNORE_PATTERNS;
+  }
+  // Full AOSP workspaces opt into the specialized Android XML extractor. Keep
+  // generated output/cache exclusions, but restore the root build/ and vendor/
+  // source trees (nested third-party build/vendor directories stay excluded).
+  const resourcePatterns = new Set(ANDROID_RESOURCE_IGNORE_PATTERNS);
+  return [
+    ...DEFAULT_IGNORE_PATTERNS.filter((pattern) => !resourcePatterns.has(pattern)),
+    '!/build/',
+    '!/vendor/',
+  ];
+}
 
 /** True if `buf` decodes as strict UTF-8 (no invalid byte sequences). */
 function isValidUtf8(buf: Buffer): boolean {
@@ -309,7 +332,7 @@ function readGitignorePatterns(giPath: string): string {
  * it project code; the explicit `.gitignore` negation is the only opt-in).
  */
 export function buildDefaultIgnore(rootDir: string): Ignore {
-  const ig = ignore().add(DEFAULT_IGNORE_PATTERNS);
+  const ig = ignore().add(defaultIgnorePatterns(rootDir));
   const rootGitignore = path.join(rootDir, '.gitignore');
   if (fs.existsSync(rootGitignore)) ig.add(readGitignorePatterns(rootGitignore));
   return ig;
@@ -320,8 +343,8 @@ export function buildDefaultIgnore(rootDir: string): Ignore {
  * parent repo's own ignore rules must NOT apply — inside embedded child repos,
  * whose gitignore semantics their own `git ls-files` already enforced (#514).
  */
-function defaultsOnlyIgnore(): Ignore {
-  return ignore().add(DEFAULT_IGNORE_PATTERNS);
+function defaultsOnlyIgnore(rootDir?: string): Ignore {
+  return ignore().add(defaultIgnorePatterns(rootDir));
 }
 
 /**
@@ -430,7 +453,7 @@ function collectIncludedFiles(
   overrides: Record<string, Language>,
 ): Set<string> {
   const out = new Set<string>();
-  const defaults = defaultsOnlyIgnore();
+  const defaults = defaultsOnlyIgnore(rootDir);
   const visited = new Set<string>();
 
   const consider = (abs: string, rel: string, isDir: boolean): void => {
@@ -641,7 +664,6 @@ function findNestedGitRepos(absDir: string, relPrefix: string): string[] {
  */
 export class ScopeIgnore {
   private embedded: Array<{ root: string; matcher: Ignore }>;
-  private defaults: Ignore = defaultsOnlyIgnore();
   constructor(
     private rootMatcher: Ignore,
     embedded: Array<{ root: string; matcher: Ignore }>,
@@ -662,6 +684,7 @@ export class ScopeIgnore {
      */
     private include: Ignore | null = null,
     private includeRoots: string[] = [],
+    private defaults: Ignore = defaultsOnlyIgnore(),
   ) {
     // Longest root first so paths in nested embedded repos hit the innermost matcher.
     this.embedded = [...embedded].sort((a, b) => b.root.length - a.root.length);
@@ -716,6 +739,7 @@ export function buildScopeIgnore(rootDir: string, embeddedRoots?: Iterable<strin
     loadExcludeMatcher(rootDir),
     include,
     include ? includeStaticRoots(loadIncludePatterns(rootDir)) : [],
+    defaultsOnlyIgnore(rootDir),
   );
 }
 
@@ -769,7 +793,7 @@ export function discoverEmbeddedRepoRoots(rootDir: string): string[] {
     return [];
   }
   const out: string[] = [];
-  const defaults = defaultsOnlyIgnore();
+  const defaults = defaultsOnlyIgnore(rootDir);
   const includeIgnored = loadIncludeIgnoredMatcher(rootDir);
   const visit = (repoAbs: string, prefix: string): void => {
     const candidates: string[] = [];
@@ -848,7 +872,7 @@ export function findUnindexedIgnoredRepos(rootDir: string): string[] {
   } catch {
     return [];
   }
-  const defaults = defaultsOnlyIgnore();
+  const defaults = defaultsOnlyIgnore(rootDir);
   const includeIgnored = loadIncludeIgnoredMatcher(rootDir);
   const repos: string[] = [];
   for (const dir of listIgnoredDirs(rootDir)) {

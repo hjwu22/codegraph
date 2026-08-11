@@ -279,6 +279,7 @@ CodeGraph's parsing engine is a **native Rust kernel**: 20 languages — TypeScr
 | **Impact Analysis** | Trace callers, callees, and the full impact radius of any symbol before making changes |
 | **Always Fresh** | File watcher uses native OS events (FSEvents/inotify/ReadDirectoryChangesW) with debounced auto-sync — the graph stays current as you code, zero config |
 | **20+ Languages** | TypeScript, JavaScript, ArkTS, Python, Go, Rust, Java, C#, VB.NET, PHP, Ruby, C, C++, CUDA, Objective-C, Metal, Swift, Kotlin, Scala, Dart, Lua, Luau, R, Nix, Erlang, CFML, COBOL, Solidity, Terraform/OpenTofu, Svelte, Vue, Astro, Liquid, Pascal/Delphi |
+| **Android AOSP graph** | Indexes Android.bp/Soong, Android.mk, Bazel/Kleaf, AIDL/Binder, JNI, DTS/DTSI, HIDL/VINTF, init rc, sysprop, SELinux, Kconfig/Kbuild, Proto, manifests/resources/RRO — including protocol-specific cross-language bridges |
 | **Framework-aware Routes** | Recognizes web-framework routing files and links URL patterns to their handlers across 17 frameworks |
 | **Mixed iOS / React Native / Expo** | Closes cross-language flows that static parsing misses: Swift ↔ ObjC bridging, React Native legacy bridge + TurboModules + Fabric view components, native → JS event emitters, Expo Modules |
 | **100% Local** | No data leaves your machine. No API keys. No external services. SQLite database only |
@@ -523,6 +524,7 @@ codegraph callers <symbol>        # Find what calls a function/method (--limit, 
 codegraph callees <symbol>        # Find what a function/method calls (--limit, --json)
 codegraph impact <symbol>         # Analyze what code is affected by changing a symbol (--depth, --json)
 codegraph affected [files...]     # Find test files affected by changes (see below)
+codegraph aosp enrich [path]      # Import existing module-info/Bazel-query/kernel-config metadata; never runs a build
 codegraph daemon                  # Manage background daemons — pick one to stop (alias: daemons)
 codegraph telemetry [on|off]      # Show or change anonymous usage telemetry
 codegraph upgrade [version]       # Update to the latest release (--check, --force)
@@ -692,6 +694,81 @@ language or a malformed file is warned about and skipped — it never breaks
 indexing — and a project with no `codegraph.json` behaves exactly as before.
 Re-index (`codegraph index`) after adding or changing mappings.
 
+### Android AOSP
+
+An AOSP checkout is detected from `.repo/manifest.xml`, the Soong/Make source
+tree, or a root `Android.bp` plus canonical framework/system directories. In an
+AOSP workspace CodeGraph indexes the build/configuration inputs that ordinary
+language-only graphs miss:
+
+- Android.bp/Soong and Android.mk/Kati modules, sources, dependencies, product
+  packages, and generated-output declarations.
+- Bazel/Starlark and Kleaf targets, labels, `load`, `glob`, and conservative
+  `select()` branches.
+- AIDL/Binder (including stable-interface metadata), bidirectional JNI static,
+  `RegisterNatives`, and literal callback bindings, Device Tree and binding YAML,
+  HIDL/VINTF, init services/property triggers, SELinux contexts, Kconfig/Kbuild,
+  Proto, AndroidManifest/resources, runtime resource overlays, TEST_MAPPING, and
+  Tradefed test configurations.
+
+Static indexing never executes Soong, Kati, Bazel, dtc, Kconfig tools, or m4.
+To add exact selected-product metadata, first produce `module-info.json`, a
+captured Bazel query/cquery `jsonproto`, and/or a kernel `.config` with your
+normal AOSP build workflow, then import the existing files explicitly:
+
+```bash
+codegraph aosp enrich --product aosp_cf_x86_64_phone
+# or: codegraph aosp enrich --module-info /path/to/module-info.json
+# or: codegraph aosp enrich --bazel-query /path/to/cquery.json
+# or: codegraph aosp enrich --kernel-config /path/to/kernel/.config
+```
+
+The optional `codegraph.json` settings are:
+
+```json
+{
+  "aosp": {
+    "enabled": "auto",
+    "buildGraph": "hybrid",
+    "product": null,
+    "outDir": "out",
+    "moduleInfo": null,
+    "compileCommands": null,
+    "bazelQuery": null,
+    "kernelConfig": null,
+    "indexAndroidResources": true
+  }
+}
+```
+
+`enabled` controls the AOSP workspace profile and authoritative enrichment:
+`"auto"` activates the resource profile for detected AOSP roots, `true`
+force-enables it for a standalone platform repository, and `false` keeps the
+ordinary Android resource exclusions and rejects `aosp enrich`. Recognized AOSP
+source artifacts remain parseable when explicitly included. `buildGraph` is
+`"static"` for source evidence only, `"authoritative"` for separate imported
+metadata nodes, or `"hybrid"` (the default) to add exact selected-product edges
+to matching static targets when possible.
+
+When the AOSP profile is active, the root `build/` and `vendor/` directories are
+treated as platform source trees, while nested third-party directories with
+those names remain excluded. Generated `out/`, Bazel output symlinks, and
+`.repo/` object metadata remain excluded.
+
+The Bazel provider accepts the real `query --output=jsonproto` and
+`cquery --output=jsonproto` envelopes as well as the legacy flat capture format.
+It reads the capture only; it never invokes Bazel. See Bazel's
+[cquery documentation](https://bazel.build/query/cquery) for how configured
+results differ from ordinary query output.
+
+Framework resources are indexed only for detected AOSP workspaces; ordinary
+Android apps retain the default resource-directory exclusion to avoid turning a
+mostly-XML app into an oversized, low-signal graph.
+
+The implementation matrix, feasibility decisions, validation evidence, and
+honest residual boundaries are recorded in
+[`docs/achievements/aosp-support.md`](docs/achievements/aosp-support.md).
+
 ## Telemetry
 
 CodeGraph collects **anonymous usage statistics** — which tools and commands get
@@ -803,6 +880,17 @@ is written):
 | Solidity | `.sol` | Full support (contracts, libraries, interfaces, structs, enums, modifiers, events, errors, state variables, `import`/`using` directives, `emit`/`revert` calls) |
 | Terraform / OpenTofu | `.tf`, `.tfvars`, `.tofu` | Full support (resources, data sources, modules, variables, outputs, providers incl. aliases, `locals`; `var.`/`local.`/`module.`/resource references with Terraform's per-directory scoping enforced; module calls bridged across the boundary — inputs to the child module's variables, `module.M.out` to the child's output, `source` to the module's files; cloudposse/atmos `remote-state` cross-component wiring when the component is statically named; `provider = aws.east` selections resolved up the module tree; `moved`/`import`/`removed`/`check` block references; `.tfvars` assignments linked to the variables they set) |
 | Nix | `.nix` | Full support (functions with simple/destructured/curried params, `let`/attrset bindings, `inherit`, `import ./path` file edges — `./dir` resolving through `default.nix` — plus NixOS module `imports = [ ./x.nix ]` lists and `callPackage ./pkg.nix` file edges; call edges; module-system option wiring — a config write like `launchd.user.agents.x = { ... }` links to the module declaring `options.launchd.user.agents`, so option flows trace across modules) |
+| Android AIDL | `.aidl` | AOSP support (packages, interfaces, methods, parcelables/unions/enums, imports, inheritance, Binder binding bridges) |
+| Android Blueprint / Soong | `Android.bp`, `.bp` | AOSP support (modules, source/dependency/default relationships, generated outputs; optional `module-info.json` enrichment) |
+| Android Make / Kati | `Android.mk`, `BoardConfig.mk`, `device.mk`, `product.mk`, `.mk` | AOSP support for common `LOCAL_*`, `BUILD_*`, `PRODUCT_*`, and `inherit-product` patterns; dynamic Make evaluation remains conservative |
+| Bazel / Starlark / Kleaf | `BUILD`, `BUILD.bazel`, `WORKSPACE*`, `MODULE.bazel`, `.bzl` | AOSP support (targets, labels, loads, source/dependency fields, conservative `select`; pinned ABI-14 Starlark grammar) |
+| Device Tree | `.dts`, `.dtsi`, binding `.yaml` | AOSP support (nodes, labels, includes, phandles, compatible strings, overlays, schema and driver bridges; pinned ABI-15 grammar) |
+| HIDL / VINTF | `.hal`, Android VINTF XML | AOSP support (packages/versions/interfaces/methods, HAL instances and AIDL/HIDL interface binding) |
+| Android init / sysprop | `.rc`, `.sysprop` | AOSP support (services, triggers, property operations, service-to-build-target binding, property declarations) |
+| Android SELinux | `.te`, `.cil`, `.fc`, `*_contexts` | AOSP support (types, attributes, rules, service/property/file contexts and runtime binding) |
+| Kconfig / Kbuild | `Kconfig`, `Kbuild` | AOSP support (config symbols, dependencies/selects, source imports, config-gated objects) |
+| Protocol Buffers | `.proto` | AOSP support (messages, enums, services, RPCs, imports, type relationships) |
+| AOSP test metadata | `TEST_MAPPING`, Tradefed XML | Test groups/imports/options, Tradefed classes/modules/filters, module-info test configs, and build-dependency impact |
 
 ## Measured cross-file coverage
 

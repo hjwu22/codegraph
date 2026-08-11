@@ -21,6 +21,7 @@ import { resolveViaImport, resolveJvmImport, extractImportMappings, extractReExp
 import { ResolverPool, minRefsForPool } from './resolver-pool';
 import { detectFrameworks } from './frameworks';
 import { synthesizeCallbackEdges } from './callback-synthesizer';
+import { synthesizeAospEdges } from './aosp-synthesizer';
 import { createYielder, type MaybeYield } from './cooperative-yield';
 import { loadProjectAliases, type AliasMap } from './path-aliases';
 import { loadGoModule, type GoModule } from './go-module';
@@ -685,8 +686,8 @@ export class ReferenceResolver {
         return reExports;
       },
 
-      getCppIncludeDirs: () => {
-        return loadCppIncludeDirs(this.projectRoot);
+      getCppIncludeDirs: (filePath?: string) => {
+        return loadCppIncludeDirs(this.projectRoot, filePath);
       },
     };
   }
@@ -1946,6 +1947,12 @@ export class ReferenceResolver {
     } catch {
       // synthesis is additive and optional; ignore failures
     }
+    try {
+      aggregateStats.byMethod['aosp-synthesis'] = synthesizeAospEdges(this.queries, this.context);
+    } catch {
+      // AOSP synthesis is additive and optional; an unsupported convention
+      // must never fail an otherwise-valid index.
+    }
     if (process.env.CODEGRAPH_SYNTH_TIMINGS) console.error(`[phase-timing] callback-synthesis: ${Date.now() - tSynth}ms`);
     } finally {
       if (pool) await pool.destroy().catch(() => undefined);
@@ -2418,7 +2425,12 @@ export class ReferenceResolver {
     if (!result) return result;
     const tgt = this.getLanguageFromNodeId(result.targetNodeId);
     if (!tgt || !ref.language) return result;
-    if ((ref.referenceKind === 'references' || ref.referenceKind === 'function_ref') && !sameLanguageFamily(tgt, ref.language)) return null;
+    const aospBuildLanguage = ref.language === 'blueprint' || ref.language === 'make' || ref.language === 'starlark' || ref.language === 'kconfig';
+    // Build metadata is intentionally cross-language: a Blueprint/Make/Bazel
+    // source path references a Java/C++/AIDL/etc. file. The resolver has
+    // already required path/name evidence; exempt only these build DSLs from
+    // the programming-language type-family gate.
+    if ((ref.referenceKind === 'references' || ref.referenceKind === 'function_ref') && !aospBuildLanguage && !sameLanguageFamily(tgt, ref.language)) return null;
     if (ref.referenceKind === 'imports' && crossesKnownFamily(tgt, ref.language)) return null;
     return result;
   }

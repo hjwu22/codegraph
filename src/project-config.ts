@@ -67,6 +67,32 @@ export interface ProjectConfig {
    * wins. Absent/empty (the default) forces nothing in.
    */
   include?: string[];
+  /** Android Open Source Project indexing and optional build-graph enrichment. */
+  aosp?: AospProjectConfig;
+}
+
+export interface AospProjectConfig {
+  enabled?: 'auto' | boolean;
+  buildGraph?: 'static' | 'authoritative' | 'hybrid';
+  product?: string | null;
+  outDir?: string;
+  moduleInfo?: string | null;
+  compileCommands?: string | null;
+  bazelQuery?: string | null;
+  kernelConfig?: string | null;
+  indexAndroidResources?: boolean;
+}
+
+export interface ResolvedAospProjectConfig {
+  enabled: 'auto' | boolean;
+  buildGraph: 'static' | 'authoritative' | 'hybrid';
+  product: string | null;
+  outDir: string;
+  moduleInfo: string | null;
+  compileCommands: string | null;
+  bazelQuery: string | null;
+  kernelConfig: string | null;
+  indexAndroidResources: boolean;
 }
 
 /** Parsed, validated view of a project's `codegraph.json`. */
@@ -75,6 +101,7 @@ interface ParsedConfig {
   includeIgnored: string[];
   exclude: string[];
   include: string[];
+  aosp: ResolvedAospProjectConfig;
 }
 
 interface CacheEntry {
@@ -97,6 +124,11 @@ const EMPTY_CONFIG: ParsedConfig = Object.freeze({
   includeIgnored: Object.freeze([]) as unknown as string[],
   exclude: Object.freeze([]) as unknown as string[],
   include: Object.freeze([]) as unknown as string[],
+  aosp: Object.freeze({
+    enabled: 'auto', buildGraph: 'hybrid', product: null, outDir: 'out',
+    moduleInfo: null, compileCommands: null, bazelQuery: null, kernelConfig: null,
+    indexAndroidResources: true,
+  }) as ResolvedAospProjectConfig,
 });
 
 /**
@@ -149,15 +181,42 @@ function parseConfig(file: string): ParsedConfig {
   const includeIgnored = extractIncludeIgnored(parsed, file);
   const exclude = extractExclude(parsed, file);
   const include = extractInclude(parsed, file);
+  const aosp = extractAosp(parsed, file);
   if (
     extensions === EMPTY_EXTENSIONS &&
     includeIgnored.length === 0 &&
     exclude.length === 0 &&
-    include.length === 0
+    include.length === 0 && aosp === EMPTY_CONFIG.aosp
   ) {
     return EMPTY_CONFIG;
   }
-  return { extensions, includeIgnored, exclude, include };
+  return { extensions, includeIgnored, exclude, include, aosp };
+}
+
+function extractAosp(parsed: object, file: string): ResolvedAospProjectConfig {
+  const raw = (parsed as ProjectConfig).aosp;
+  if (raw === undefined) return EMPTY_CONFIG.aosp;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    logWarn(`Ignoring "aosp" in ${PROJECT_CONFIG_FILENAME}: must be an object`, { file });
+    return EMPTY_CONFIG.aosp;
+  }
+  const defaults = EMPTY_CONFIG.aosp;
+  const enabled = raw.enabled === 'auto' || typeof raw.enabled === 'boolean' ? raw.enabled : defaults.enabled;
+  const buildGraph = ['static', 'authoritative', 'hybrid'].includes(String(raw.buildGraph))
+    ? raw.buildGraph as ResolvedAospProjectConfig['buildGraph'] : defaults.buildGraph;
+  const nullableString = (value: unknown, fallback: string | null): string | null =>
+    value === null || typeof value === 'string' ? value : fallback;
+  return {
+    enabled,
+    buildGraph,
+    product: nullableString(raw.product, defaults.product),
+    outDir: typeof raw.outDir === 'string' && raw.outDir.trim() ? raw.outDir.trim() : defaults.outDir,
+    moduleInfo: nullableString(raw.moduleInfo, defaults.moduleInfo),
+    compileCommands: nullableString(raw.compileCommands, defaults.compileCommands),
+    bazelQuery: nullableString(raw.bazelQuery, defaults.bazelQuery),
+    kernelConfig: nullableString(raw.kernelConfig, defaults.kernelConfig),
+    indexAndroidResources: typeof raw.indexAndroidResources === 'boolean' ? raw.indexAndroidResources : defaults.indexAndroidResources,
+  };
 }
 
 /**
@@ -336,6 +395,11 @@ export function loadExcludePatterns(rootDir: string): string[] {
  */
 export function loadIncludePatterns(rootDir: string): string[] {
   return loadParsedConfig(rootDir).include;
+}
+
+/** Load the validated AOSP configuration with zero-config defaults applied. */
+export function loadAospProjectConfig(rootDir: string): ResolvedAospProjectConfig {
+  return loadParsedConfig(rootDir).aosp;
 }
 
 /** Test/maintenance hook: forget cached config (e.g. after rewriting it in a test). */

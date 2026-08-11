@@ -7,6 +7,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { Language, Node } from '../types';
+import { loadAospProjectConfig } from '../project-config';
 import { UnresolvedRef, ResolvedRef, ResolutionContext, ImportMapping, ReExport } from './types';
 import { applyAliases } from './path-aliases';
 import { resolveWorkspaceImport } from './workspace-packages';
@@ -167,7 +168,7 @@ function resolveImportPathUncached(
   // resolution found a match, search -I directories from
   // compile_commands.json or heuristic probing.
   if (language === 'c' || language === 'cpp') {
-    return resolveCppIncludePath(importPath, language, context);
+    return resolveCppIncludePath(importPath, fromFile, language, context);
   }
 
   return null;
@@ -500,7 +501,11 @@ function resolveAliasedImport(
  * C/C++ include directory cache (keyed by project root).
  * Loaded once per resolver instance, shared across calls.
  */
-const cppIncludeDirCache = new Map<string, string[]>();
+interface CppIncludeDirectoryIndex {
+  all: string[];
+  byFile: Map<string, string[]>;
+}
+const cppIncludeDirCache = new Map<string, CppIncludeDirectoryIndex>();
 
 /**
  * Clear the C/C++ include directory cache (call between indexing runs)
@@ -522,15 +527,15 @@ export function clearCppIncludeDirCache(): void {
  *
  * Returns paths relative to projectRoot.
  */
-export function loadCppIncludeDirs(projectRoot: string): string[] {
+export function loadCppIncludeDirs(projectRoot: string, filePath?: string): string[] {
   const cached = cppIncludeDirCache.get(projectRoot);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined) return filePath && cached.byFile.has(filePath) ? cached.byFile.get(filePath)! : cached.all;
 
-  const dirs = loadCppIncludeDirsFromCompileDB(projectRoot)
-    || loadCppIncludeDirsHeuristic(projectRoot);
+  const index = loadCppIncludeDirsFromCompileDB(projectRoot)
+    || { all: loadCppIncludeDirsHeuristic(projectRoot), byFile: new Map<string, string[]>() };
 
-  cppIncludeDirCache.set(projectRoot, dirs);
-  return dirs;
+  cppIncludeDirCache.set(projectRoot, index);
+  return filePath && index.byFile.has(filePath) ? index.byFile.get(filePath)! : index.all;
 }
 
 /**
@@ -538,8 +543,10 @@ export function loadCppIncludeDirs(projectRoot: string): string[] {
  * Returns null if no compilation database is found (so the heuristic
  * fallback can run). Returns an array (possibly empty) otherwise.
  */
-function loadCppIncludeDirsFromCompileDB(projectRoot: string): string[] | null {
+function loadCppIncludeDirsFromCompileDB(projectRoot: string): CppIncludeDirectoryIndex | null {
+  const configured = loadAospProjectConfig(projectRoot).compileCommands;
   const candidates = [
+    ...(configured ? [path.resolve(projectRoot, configured)] : []),
     path.join(projectRoot, 'compile_commands.json'),
     path.join(projectRoot, 'build', 'compile_commands.json'),
     path.join(projectRoot, 'cmake-build-debug', 'compile_commands.json'),
@@ -564,15 +571,18 @@ function loadCppIncludeDirsFromCompileDB(projectRoot: string): string[] | null {
     const content = fs.readFileSync(dbPath, 'utf-8');
     const entries = JSON.parse(content) as Array<{
       directory: string;
+      file?: string;
       command?: string;
       arguments?: string[];
     }>;
     if (!Array.isArray(entries)) return null;
 
     const dirSet = new Set<string>();
+    const byFile = new Map<string, string[]>();
     for (const entry of entries) {
       const dir = entry.directory || projectRoot;
       const args = entry.arguments || (entry.command ? shlexSplit(entry.command) : []);
+      const entryDirs = new Set<string>();
       for (let i = 0; i < args.length; i++) {
         const arg = args[i]!;
         let includeDir: string | undefined;
@@ -596,11 +606,17 @@ function loadCppIncludeDirsFromCompileDB(projectRoot: string): string[] | null {
           // /usr/include or C:\usr on Windows)
           if (!relPath.startsWith('..') && relPath.length > 0 && !path.isAbsolute(relPath)) {
             dirSet.add(relPath);
+            entryDirs.add(relPath);
           }
         }
       }
+      if (entry.file) {
+        const absFile = path.isAbsolute(entry.file) ? entry.file : path.resolve(dir, entry.file);
+        const relativeFile = path.relative(projectRoot, absFile).replace(/\\/g, '/');
+        if (!relativeFile.startsWith('..') && !path.isAbsolute(relativeFile)) byFile.set(relativeFile, [...entryDirs]);
+      }
     }
-    return Array.from(dirSet);
+    return { all: Array.from(dirSet), byFile };
   } catch {
     return null;
   }
@@ -684,10 +700,11 @@ function loadCppIncludeDirsHeuristic(projectRoot: string): string[] {
  */
 function resolveCppIncludePath(
   importPath: string,
+  fromFile: string,
   language: Language,
   context: ResolutionContext
 ): string | null {
-  const includeDirs = context.getCppIncludeDirs?.() ?? [];
+  const includeDirs = context.getCppIncludeDirs?.(fromFile) ?? [];
   const extensions = EXTENSION_RESOLUTION[language] ?? [];
 
   for (const dir of includeDirs) {

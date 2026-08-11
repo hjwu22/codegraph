@@ -42,6 +42,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { getCodeGraphDir, isInitialized, unsafeIndexRootReason, findNearestCodeGraphRoot, planFrontload, hasStructuralKeyword, extractCodeTokens } from '../directory';
 import { extractProseCandidates } from '../search/identifier-segments';
+import { isAospTestMetadataFile } from '../search/query-utils';
 import { detectWorktreeIndexMismatch, worktreeMismatchWarning } from '../sync/worktree';
 import { createShimmerProgress } from '../ui/shimmer-progress';
 import { getGlyphs } from '../ui/glyphs';
@@ -588,6 +589,48 @@ async function recordIndexTelemetry(
 // =============================================================================
 // Commands
 // =============================================================================
+
+const aospCommand = program
+  .command('aosp')
+  .description('Android Open Source Project metadata tools');
+
+aospCommand
+  .command('enrich [path]')
+  .description('Import existing AOSP module-info/Bazel query/kernel config metadata (never runs a build)')
+  .option('--product <name>', 'selected lunch product/variant')
+  .option('--module-info <path>', 'path to an existing module-info.json')
+  .option('--out-dir <path>', 'AOSP output directory (default: configured outDir or out)')
+  .option('--bazel-query <path>', 'path to captured Bazel query/cquery JSON')
+  .option('--kernel-config <path>', 'path to an existing kernel .config or defconfig')
+  .option('--json', 'print machine-readable JSON')
+  .action(async (pathArg: string | undefined, options: { product?: string; moduleInfo?: string; outDir?: string; bazelQuery?: string; kernelConfig?: string; json?: boolean }) => {
+    const projectPath = resolveProjectPath(pathArg);
+    if (!isInitialized(projectPath)) {
+      error(`CodeGraph is not initialized in ${projectPath}. Run codegraph init first.`);
+      process.exitCode = 1;
+      return;
+    }
+    let cg: { destroy(): void; enrichAosp(options: { product?: string; moduleInfo?: string; outDir?: string; bazelQuery?: string; kernelConfig?: string }): {
+      moduleInfoPath: string | null; bazelQueryPath: string | null; kernelConfigPath: string | null; product: string | null; targetsImported: number; configsImported: number; nodesCreated: number; edgesCreated: number;
+    } } | undefined;
+    try {
+      const { default: CodeGraph } = await loadCodeGraph();
+      cg = CodeGraph.openSync(projectPath);
+      const result = cg.enrichAosp({ product: options.product, moduleInfo: options.moduleInfo, outDir: options.outDir, bazelQuery: options.bazelQuery, kernelConfig: options.kernelConfig });
+      if (options.json) console.log(JSON.stringify(result, null, 2));
+      else {
+        success(`Imported ${formatNumber(result.targetsImported)} AOSP build targets`);
+        if (result.configsImported > 0) info(`${formatNumber(result.configsImported)} selected kernel configuration values`);
+        info(`${formatNumber(result.nodesCreated)} nodes, ${formatNumber(result.edgesCreated)} graph edges`);
+        info(`Source: ${[result.moduleInfoPath, result.bazelQueryPath, result.kernelConfigPath].filter(Boolean).join(', ')}${result.product ? ` (${result.product})` : ''}`);
+      }
+    } catch (err) {
+      error(err instanceof Error ? err.message : String(err));
+      process.exitCode = 1;
+    } finally {
+      cg?.destroy();
+    }
+  });
 
 /**
  * codegraph init [path]
@@ -2173,7 +2216,7 @@ program
 
       function isTestFile(filePath: string): boolean {
         if (customFilter) return customFilter.test(filePath);
-        return defaultTestPatterns.some(p => p.test(filePath));
+        return isAospTestMetadataFile(filePath) || defaultTestPatterns.some(p => p.test(filePath));
       }
 
       // BFS to find all transitive dependents of changed files, filtered to test files

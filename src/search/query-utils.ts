@@ -282,6 +282,12 @@ export function isTestFile(filePath: string): boolean {
   const fileName = path.basename(filePath);   // original case — needed for camelCase boundaries
   const lowerName = fileName.toLowerCase();
 
+  // AOSP test metadata has conventional names rather than a language-specific
+  // test suffix. Treating these as test files lets the ordinary file-level
+  // `affected` traversal surface them after build/test metadata edges are
+  // synthesized, instead of requiring an AOSP-only parallel command.
+  if (isAospTestMetadataFile(filePath)) return true;
+
   // --- Filename patterns ---
   if (
     lowerName.startsWith('test_') ||                              // python: test_foo.py
@@ -316,6 +322,12 @@ export function isTestFile(filePath: string): boolean {
   // Check both mid-path (/integration/) and start-of-path (integration/) since
   // file paths may be stored as relative paths without a leading slash.
   return matchesNonProductionDir(lower);
+}
+
+/** AOSP metadata files that represent runnable test selection/configuration. */
+export function isAospTestMetadataFile(filePath: string): boolean {
+  const fileName = path.basename(filePath);
+  return fileName === 'TEST_MAPPING' || /^AndroidTest(?:Template)?\.xml$/i.test(fileName);
 }
 
 /**

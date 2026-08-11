@@ -3225,6 +3225,24 @@ int run() {
       }
     });
 
+    it('keeps compile_commands include paths scoped to the owning source file', () => {
+      const tempProject = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-cpp-test-'));
+      try {
+        fs.mkdirSync(path.join(tempProject, 'src'), { recursive: true });
+        const compileDb = [
+          { directory: tempProject, arguments: ['clang++', '-Iproduct/a/include', '-c', 'src/a.cpp'], file: 'src/a.cpp' },
+          { directory: tempProject, arguments: ['clang++', '-Iproduct/b/include', '-c', 'src/b.cpp'], file: 'src/b.cpp' },
+        ];
+        fs.writeFileSync(path.join(tempProject, 'compile_commands.json'), JSON.stringify(compileDb));
+        clearCppIncludeDirCache();
+        expect(loadCppIncludeDirs(tempProject, 'src/a.cpp')).toEqual(['product/a/include']);
+        expect(loadCppIncludeDirs(tempProject, 'src/b.cpp')).toEqual(['product/b/include']);
+        expect(loadCppIncludeDirs(tempProject)).toEqual(expect.arrayContaining(['product/a/include', 'product/b/include']));
+      } finally {
+        fs.rmSync(tempProject, { recursive: true });
+      }
+    });
+
     it('should fall back to heuristic include dirs when no compile_commands.json', () => {
       const tempProject = fs.mkdtempSync(path.join(os.tmpdir(), 'codegraph-cpp-test-'));
       try {

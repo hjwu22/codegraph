@@ -177,7 +177,7 @@ export interface ResolutionContext {
    * Used by resolveCppIncludePath to search -I directories when
    * relative resolution fails. Optional so existing callers compile.
    */
-  getCppIncludeDirs?(): string[];
+  getCppIncludeDirs?(filePath?: string): string[];
 }
 
 /**
