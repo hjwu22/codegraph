@@ -404,12 +404,60 @@ channel 的驗證全部是靠「挑對子樹」達成的,不是靠索引全部�
    `resolution/types.ts:79` 說明 `iterateNodesByKind` 存在的目的是避免撐大 per-kind 陣列
    快取,但 `nodesOf` 拿到 iterator 後立刻 spread 成完整陣列。7 個 synthesizer 各呼叫
    一到三次。在 3.0M nodes 的規模這是致命的。
-2. **無 checkpoint / resume** —— 本次驗證中已有兩次索引在中途死亡需從頭重跑。
-3. **合成階段無 yield**(見上 N-5)。
-4. **`.repo` 下 1000+ 個 git 專案**,`discoverEmbeddedRepoRoots` 在此規模的行為未知。
+2. **無 checkpoint / resume** —— 本次驗證中已有兩次索引在中途死亡需從頭重跑。設計方案見
+   [checkpoint-resume-design.md](./checkpoint-resume-design.md)。實測補充:`indexAll`
+   **不會**清空資料庫,寫到一半的檔案也不會留下記錄(所以續跑的資料完整性前提已成立),
+   但批次路徑沒有沿用增量路徑的 content-hash 跳過 —— 對已完成的索引重跑一次是
+   **23 秒 vs 首次 29 秒**,並非略過工作。
+3. **合成階段無 yield**(見上 N-5)。這同時是 resume 的前提:沒有 yield 的 resume 只會在
+   同一個位置重複死亡。
+4. ~~**`.repo` 下 1000+ 個 git 專案**,`discoverEmbeddedRepoRoots` 在此規模的行為未知。~~
+   **已查明並修正(commit `bb10e7d`)** —— 見下節。
 
-**務實的目標不是「索引整個 AOSP」,而是「索引 209k 的平台層」。** 那個規模在解決 1 與 3
+### 巢狀 repo 的 gitignore 被完全跳過(已修)
+
+`repo` checkout 的根目錄不是 git repo,`discoverEmbeddedRepoRoots` 第一行 `git rev-parse`
+失敗即 `return []`。對真實 AOSP 唯讀實測:**回傳 0 個、耗時 3 ms** —— 1,376 個專案的
+`.gitignore` 一條都沒被讀取。
+
+這個機制存在的理由(程式碼註解引用 #514)正是「嵌入式子 repo 內,父 repo 的 ignore 規則
+不該套用」,但它的進入條件是「根目錄是 git repo」,而 `repo` checkout 恰好不是。
+
+檔案系統走訪也不可行:`EMBEDDED_REPO_SEARCH_ENTRIES = 2000` 是刻意的上限(避免被巨大的
+ignored 資料夾拖死),遠低於 AOSP 的目錄數,會在任意位置截斷。
+
+修法是讀 `.repo/project.list` —— `repo` 自己維護的權威清單,與 `aosp enrich` 讀
+`module-info.json` 而非跑建置是同一原則。實測 **0 → 1,373 個,33 ms**
+(`buildScopeIgnore` 於其上 698 ms)。
+
+行為差異,6 個取自各專案自身 `.gitignore` 的探測路徑:
+
+| 探測路徑 | 前 | 後 | 依據的規則 |
+|---|---|---|---|
+| `art/JIT_ART/probe.c` | false | **true** | art 的 `JIT_ART` |
+| `build/soong/.idea/probe.c` | false | **true** | build/soong 的 `/.idea` |
+| `build/make/blueprint/probe.c` | false | **true** | build/make 的 `blueprint/` |
+| `build/blueprint/out.test/probe.c` | false | **true** | build/blueprint 的 `out.test` |
+| `build/bazel/.idea/probe.c` | false | **true** | build/bazel 的 `/.idea` |
+| `bootable/libbootloader/gbl/bazel-bin/probe.c` | true | true | 本來就被內建 `bazel-*/` 擋掉 |
+
+1,376 中有 3 個被濾掉,因為內建預設樣式已宣告該路徑(`developers/build` 撞 `build/`、
+`external/bazel-skylib` 撞 `bazel-*/`、`trusty/vendor/…` 撞 `vendor/`)。這不改變行為:
+`ScopeIgnore` 在 embedded 分支內仍套用 `this.defaults.ignores(rel)`,註冊了也無法讓那些
+檔案重新納入。
+
+**附帶查證**:`__tests__/multi-repo-workspace.test.ts` 有 7 個既有失敗,在 `main` 上完全
+相同(症狀為 `includeIgnored` opt-in 未將 embedded repo 的檔案掃入;環境 git 2.34.1)。
+**與本 PR 無關**,不要誤記為回歸。
+
+---
+
+**務實的目標不是「索引整個 AOSP」,而是「索引 209k 的第一方樹」。** 那個規模在解決 1 與 3
 之後可達。
+
+（註:本文先前將這個範圍稱為「平台層」。那個詞容易與 Android 架構圖中的 framework layer
+混淆 —— 這裡指的是**排除 `external/` 與 `prebuilts/` 後的第一方 AOSP 程式碼**,橫跨
+bionic / art / frameworks / hardware / packages 等多層,不是單一層。）
 
 ---
 
