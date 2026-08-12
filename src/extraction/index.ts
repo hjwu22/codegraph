@@ -612,6 +612,47 @@ function classifyGitDir(absDir: string): 'embedded' | 'worktree' | 'none' {
  * from npm git-dependencies — that never makes it project code) and CodeGraph
  * data dirs. Depth- and entry-capped so a huge ignored tree can't stall the scan.
  */
+/**
+ * Embedded-repo roots of an Android `repo` checkout.
+ *
+ * A `repo` workspace has NO git repo at its root — every manifest project is
+ * its own clone, with `.git` a symlink into `.repo/projects/`. So the git-based
+ * discovery above bails out at its first command and returns nothing, and none
+ * of the projects' `.gitignore` files are ever consulted: on a real AOSP tree
+ * that silently skipped 1,376 of them.
+ *
+ * The bounded filesystem walk is not the answer either — its 2000-entry cap
+ * (deliberate: an ignored data dir must never stall a scan) is well under the
+ * directory count of an AOSP tree, so discovery would truncate arbitrarily.
+ * `repo` already maintains the authoritative list, so read it, the same way
+ * `aosp enrich` reads module-info.json rather than running the build.
+ *
+ * Projects nested inside a project (rather than listed in the manifest) are not
+ * discovered here; the manifest is the source of truth for a repo workspace.
+ */
+function repoToolProjectRoots(rootDir: string): string[] {
+  let listed: string;
+  try {
+    listed = fs.readFileSync(path.join(rootDir, '.repo', 'project.list'), 'utf-8');
+  } catch {
+    return []; // not a repo workspace (or an unreadable/partial one)
+  }
+  const defaults = defaultsOnlyIgnore(rootDir);
+  const out: string[] = [];
+  for (const line of listed.split(/\r?\n/)) {
+    const entry = normalizePath(line.trim()).replace(/\/+$/, '');
+    if (!entry || entry.startsWith('#') || entry.startsWith('/') || entry.split('/').includes('..')) continue;
+    const rel = `${entry}/`;
+    if (defaults.ignores(rel)) continue;
+    // project.list outlives an interrupted or partial `repo sync`, so trust
+    // only entries that have a checkout on disk. `.git` is a symlink into
+    // `.repo/projects/`, which classifyGitDir resolves to 'embedded'.
+    if (classifyGitDir(path.join(rootDir, entry)) !== 'embedded') continue;
+    out.push(rel);
+  }
+  return out;
+}
+
 function findNestedGitRepos(absDir: string, relPrefix: string): string[] {
   const found: string[] = [];
   const defaults = defaultsOnlyIgnore();
@@ -783,14 +824,14 @@ function gitlinkEmbeddedRepoSkipped(
  * (#514) only for directories the project opted in via `codegraph.json`
  * `includeIgnored` (#622, #699); otherwise `.gitignore` is respected and they
  * are not discovered (#970, #976). Recursive (an embedded repo can embed further
- * repos). Returns [] for non-git roots: the filesystem walk handles nested repos
- * there already.
+ * repos). For non-git roots the filesystem walk handles nested repos already,
+ * except in an Android `repo` workspace — see repoToolProjectRoots.
  */
 export function discoverEmbeddedRepoRoots(rootDir: string): string[] {
   try {
     execFileSync('git', ['rev-parse', '--git-dir'], { cwd: rootDir, encoding: 'utf-8', timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   } catch {
-    return [];
+    return repoToolProjectRoots(rootDir);
   }
   const out: string[] = [];
   const defaults = defaultsOnlyIgnore(rootDir);

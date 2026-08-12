@@ -477,4 +477,76 @@ describe('multi-repo workspaces (#514) + .gitignore-respect default (#970, #976)
       expect(findUnindexedIgnoredRepos(ws)).toEqual([]);
     });
   });
+
+  /**
+   * Android `repo` workspaces. The root is NOT a git repo — every manifest
+   * project is its own clone — so the git path bails at `rev-parse` and the
+   * filesystem walk's 2000-entry cap is far under an AOSP tree's directory
+   * count. Measured on a real android-15-r6 checkout before this was handled:
+   * 0 embedded roots found, so none of the 1,376 projects' `.gitignore` files
+   * were consulted. After: 1,373 roots in 33 ms.
+   */
+  describe('Android repo workspaces (.repo/project.list)', () => {
+    /** A project whose own `.gitignore` hides `gen/`, listed in the manifest. */
+    function makeRepoWorkspace(root: string, projects: string[]): void {
+      for (const p of projects) {
+        write(path.join(root, p, 'src.c'), 'int main(void) { return 0; }\n');
+        write(path.join(root, p, 'gen/derived.c'), 'int derived(void) { return 1; }\n');
+        write(path.join(root, p, '.gitignore'), 'gen/\n');
+        makeRepo(path.join(root, p));
+      }
+      write(path.join(root, '.repo', 'manifest.xml'), '<manifest/>');
+      write(path.join(root, '.repo', 'project.list'), projects.join('\n') + '\n');
+      // deliberately NO makeRepo(root): that is the shape of a repo checkout
+    }
+
+    it('discovers every manifest project as an embedded root', () => {
+      makeRepoWorkspace(ws, ['art', 'frameworks/base', 'system/core']);
+      expect(discoverEmbeddedRepoRoots(ws).sort()).toEqual(['art/', 'frameworks/base/', 'system/core/']);
+    });
+
+    it("applies each project's own .gitignore instead of ignoring all of them", () => {
+      makeRepoWorkspace(ws, ['art', 'frameworks/base']);
+      const scope = buildScopeIgnore(ws);
+      expect(scope.ignores('art/src.c')).toBe(false);
+      expect(scope.ignores('frameworks/base/src.c')).toBe(false);
+      // Before the fix these were indexed: no embedded root meant no matcher.
+      expect(scope.ignores('art/gen/derived.c')).toBe(true);
+      expect(scope.ignores('frameworks/base/gen/derived.c')).toBe(true);
+    });
+
+    it('skips manifest entries with no checkout on disk', () => {
+      makeRepoWorkspace(ws, ['art']);
+      // `repo sync` interrupted before this project landed.
+      fs.appendFileSync(path.join(ws, '.repo', 'project.list'), 'never/synced\n');
+      expect(discoverEmbeddedRepoRoots(ws)).toEqual(['art/']);
+    });
+
+    it('ignores a manifest entry that escapes the workspace', () => {
+      makeRepoWorkspace(ws, ['art']);
+      fs.appendFileSync(path.join(ws, '.repo', 'project.list'), '../outside\n/etc\n');
+      expect(discoverEmbeddedRepoRoots(ws)).toEqual(['art/']);
+    });
+
+    it('leaves a plain non-git directory alone', () => {
+      write(path.join(ws, 'a.ts'), 'export const a = 1;\n'); // no .repo, no git
+      expect(discoverEmbeddedRepoRoots(ws)).toEqual([]);
+    });
+
+    // A real repo checkout symlinks each `.git` into `.repo/projects/`; statSync
+    // follows it to a directory, so classifyGitDir still says 'embedded'.
+    it.runIf(process.platform !== 'win32')('handles the symlinked .git of a real checkout', () => {
+      write(path.join(ws, 'art/src.c'), 'int main(void) { return 0; }\n');
+      write(path.join(ws, 'art/gen/derived.c'), 'int derived(void) { return 1; }\n');
+      write(path.join(ws, 'art/.gitignore'), 'gen/\n');
+      makeRepo(path.join(ws, 'art'));
+      fs.mkdirSync(path.join(ws, '.repo/projects'), { recursive: true });
+      fs.renameSync(path.join(ws, 'art/.git'), path.join(ws, '.repo/projects/art.git'));
+      fs.symlinkSync(path.join('..', '.repo/projects/art.git'), path.join(ws, 'art/.git'));
+      write(path.join(ws, '.repo', 'project.list'), 'art\n');
+
+      expect(discoverEmbeddedRepoRoots(ws)).toEqual(['art/']);
+      expect(buildScopeIgnore(ws).ignores('art/gen/derived.c')).toBe(true);
+    });
+  });
 });
