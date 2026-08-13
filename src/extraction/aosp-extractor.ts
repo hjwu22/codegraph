@@ -157,6 +157,18 @@ export class AospArtifactExtractor {
   }
 
   /** Find a balanced delimiter while ignoring quoted strings and DSL comments. */
+  /**
+   * Line of a declaration whose regex leads with `(^|\n)\s*`.
+   *
+   * That prefix consumes every blank line before the declaration, and once
+   * maskComments has blanked comment lines it consumes those too — so the raw
+   * match offset lands on the previous declaration's closing line rather than
+   * this one. Anchor on the first non-space character of the match instead.
+   */
+  private declarationLine(match: RegExpExecArray): number {
+    return this.lineAt(match.index + Math.max(0, match[0].search(/\S/)));
+  }
+
   private balancedEnd(
     text: string,
     openOffset: number,
@@ -336,7 +348,7 @@ export class AospArtifactExtractor {
       const name = /\bname\s*:\s*["']([^"']+)["']/.exec(body)?.[1];
       if (!name) { moduleRe.lastIndex = end + 1; continue; }
       const type = m[2]!;
-      const line = this.lineAt(m.index + (m[1]?.length ?? 0));
+      const line = this.declarationLine(m);
       let signature = type;
       if (type === 'aidl_interface') {
         const stability = /\bstability\s*:\s*["']([^"']+)["']/.exec(body)?.[1];
@@ -400,7 +412,7 @@ export class AospArtifactExtractor {
       if (!name) continue;
       const pkg = path.posix.dirname(this.filePath.replace(/\\/g, '/'));
       const label = `//${pkg === '.' ? '' : pkg}:${name}`;
-      const line = this.lineAt(m.index);
+      const line = this.declarationLine(m);
       const target = this.addNode('build_target', name, label, line, this.lineAt(end), type);
       const sourceKeys = new Set(['srcs', 'hdrs', 'textual_hdrs', 'data']);
       for (const key of [...sourceKeys, 'deps', 'implementation_deps', 'exports', 'tools', 'runtime_deps', 'plugins']) {
@@ -565,7 +577,7 @@ export class AospArtifactExtractor {
       const body = this.source.slice(open + 1, end);
       const properties = this.topLevelBraceText(body);
       if (m[2] === 'fragment' && !m[1]) {
-        const line = this.lineAt(m.index);
+        const line = this.declarationLine(m);
         const fragment = this.addNode('device', name, `${this.filePath}::${name}`, line, this.lineAt(end), 'Device Tree overlay fragment');
         const target = /\btarget\s*=\s*<&([A-Za-z_]\w*)>/.exec(properties);
         if (target) this.addRef(fragment, target[1]!, 'overlays', line);
@@ -575,7 +587,7 @@ export class AospArtifactExtractor {
       }
       if (m[2] === '__overlay__' && !m[1]) continue;
       const compatibles = [...properties.matchAll(/\bcompatible\s*=\s*([^;]+);/g)].flatMap((cm) => this.listValues(cm[1]!));
-      const line = this.lineAt(m.index);
+      const line = this.declarationLine(m);
       const node = this.addNode('device', name, `${this.filePath}::${name}`, line, this.lineAt(end), compatibles.length ? `compatible=${compatibles.join('|')}` : 'device node');
       for (const ref of properties.matchAll(/&([A-Za-z_]\w*)/g)) this.addRef(node, ref[1]!, 'references', this.lineAt(open + 1 + ref.index!));
       const overlay = /\btarget\s*=\s*<&([A-Za-z_]\w*)>/.exec(properties);
@@ -583,9 +595,10 @@ export class AospArtifactExtractor {
       // Keep scanning inside this range: real Device Trees are deeply nested.
       // `properties` masks child blocks so parents do not inherit child facts.
     }
-    // Overlay sugar used by plugin sources: &label { ... }.
-    for (const overlay of this.source.matchAll(/(?:^|\n)\s*&([A-Za-z_]\w*)\s*\{/g)) {
-      const line = this.lineAt(overlay.index!);
+    // Overlay sugar used by plugin sources: &label { ... }. Scans `syntax`, not
+    // the raw source, so a commented-out overlay does not become a device node.
+    for (const overlay of syntax.matchAll(/(?:^|\n)\s*&([A-Za-z_]\w*)\s*\{/g)) {
+      const line = this.declarationLine(overlay as RegExpExecArray);
       const node = this.addNode('device', `&${overlay[1]}`, `${this.filePath}::overlay:&${overlay[1]}`, line, line, 'Device Tree label overlay');
       this.addRef(node, overlay[1]!, 'overlays', line);
     }

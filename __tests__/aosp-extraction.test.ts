@@ -229,6 +229,74 @@ describe('AOSP artifact extraction', () => {
     ]));
   });
 
+  it('anchors startLine on the declaration, not on preceding blank/comment lines', () => {
+    // `(^|\n)\s*` in the module/rule/node regexes eats every blank line before a
+    // declaration, and once maskComments blanks comment lines it eats those too,
+    // so the match offset lands on the PREVIOUS declaration's closing line.
+    // generateNodeId hashes startLine and every ref carries it, so this is not
+    // cosmetic. Lines are 1-based; the template's first line is empty.
+    const bp = extractFromSource('x/Android.bp', [
+      /* 1 */ '',
+      /* 2 */ 'cc_library {',
+      /* 3 */ '    name: "libfoo",',
+      /* 4 */ '}',
+      /* 5 */ '',
+      /* 6 */ '// a comment block',
+      /* 7 */ '// second line',
+      /* 8 */ '',
+      /* 9 */ 'cc_binary {',
+      /* 10 */ '    name: "foo",',
+      /* 11 */ '}',
+    ].join('\n'));
+    expect(bp.nodes.filter((n) => n.kind === 'build_target').map((n) => [n.name, n.startLine]))
+      .toEqual([['libfoo', 2], ['foo', 9]]);
+
+    const bzl = extractFromSource('x/BUILD.bazel', [
+      /* 1 */ '',
+      /* 2 */ 'cc_lib(',
+      /* 3 */ '    name = "core",',
+      /* 4 */ ')',
+      /* 5 */ '',
+      /* 6 */ '# a comment',
+      /* 7 */ '',
+      /* 8 */ 'cc_lib(',
+      /* 9 */ '    name = "tool",',
+      /* 10 */ ')',
+    ].join('\n'));
+    expect(bzl.nodes.filter((n) => n.kind === 'build_target').map((n) => [n.name, n.startLine]))
+      .toEqual([['core', 2], ['tool', 8]]);
+
+    const dts = extractFromSource('x/board.dts', [
+      /* 1 */ '/ {',
+      /* 2 */ '    soc {',
+      /* 3 */ '        uart0: serial@1000 {',
+      /* 4 */ '            compatible = "acme,uart";',
+      /* 5 */ '        };',
+      /* 6 */ '',
+      /* 7 */ '        // a comment',
+      /* 8 */ '        i2c@2000 {',
+      /* 9 */ '            compatible = "acme,i2c";',
+      /* 10 */ '        };',
+      /* 11 */ '    };',
+      /* 12 */ '};',
+    ].join('\n'));
+    expect(dts.nodes.filter((n) => n.kind === 'device').map((n) => [n.name, n.startLine]))
+      .toEqual([['soc', 2], ['uart0', 3], ['i2c@2000', 8]]);
+  });
+
+  it('does not treat a commented-out &label overlay as a device node', () => {
+    const result = extractFromSource('x/overlay.dts', [
+      '// &disabled_uart {',
+      '//     status = "okay";',
+      '// };',
+      '&uart0 {',
+      '    status = "okay";',
+      '};',
+    ].join('\n'));
+    const overlays = result.nodes.filter((n) => n.signature === 'Device Tree label overlay');
+    expect(overlays.map((n) => [n.name, n.startLine])).toEqual([['&uart0', 4]]);
+  });
+
   it('does not extract AIDL declarations out of comments', () => {
     // Real AOSP shape: the `aidl_api/` frozen-snapshot header and ordinary doc
     // comments both contain the word `interface`. AIDL declarations may end in

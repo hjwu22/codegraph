@@ -605,13 +605,12 @@ function classifyGitDir(absDir: string): 'embedded' | 'worktree' | 'none' {
   return 'embedded';
 }
 
-/**
- * Find git repositories nested under `absDir` (inclusive), shallow bounded BFS.
- * Stops descending at each repo root found — contents belong to that repo's own
- * enumeration. Skips default-ignored dirs (`node_modules` can contain `.git`
- * from npm git-dependencies — that never makes it project code) and CodeGraph
- * data dirs. Depth- and entry-capped so a huge ignored tree can't stall the scan.
- */
+/** First path segment of a root-relative path (`a/b/c` and `a/` both → `a`). */
+function firstSegment(rel: string): string {
+  const slash = rel.indexOf('/');
+  return slash < 0 ? rel : rel.slice(0, slash);
+}
+
 /**
  * Embedded-repo roots of an Android `repo` checkout.
  *
@@ -653,6 +652,13 @@ function repoToolProjectRoots(rootDir: string): string[] {
   return out;
 }
 
+/**
+ * Find git repositories nested under `absDir` (inclusive), shallow bounded BFS.
+ * Stops descending at each repo root found — contents belong to that repo's own
+ * enumeration. Skips default-ignored dirs (`node_modules` can contain `.git`
+ * from npm git-dependencies — that never makes it project code) and CodeGraph
+ * data dirs. Depth- and entry-capped so a huge ignored tree can't stall the scan.
+ */
 function findNestedGitRepos(absDir: string, relPrefix: string): string[] {
   const found: string[] = [];
   const defaults = defaultsOnlyIgnore();
@@ -729,6 +735,33 @@ export class ScopeIgnore {
   ) {
     // Longest root first so paths in nested embedded repos hit the innermost matcher.
     this.embedded = [...embedded].sort((a, b) => b.root.length - a.root.length);
+    // `ignores` runs once per file AND once per watcher event, and an Android
+    // `repo` workspace supplies ~1,376 roots — a linear scan measured 10.5 µs
+    // per call against 0.3 µs with none. A root can only match a path by being
+    // one of that path's own `/`-terminated prefixes, so index by root and probe
+    // the path's prefixes longest-first: O(path depth), independent of how many
+    // roots exist. The first-segment buckets serve the reverse question (does a
+    // root live UNDER this directory), which only directory paths ask.
+    for (const entry of this.embedded) {
+      if (!this.embeddedByRoot.has(entry.root)) this.embeddedByRoot.set(entry.root, entry);
+      const key = firstSegment(entry.root);
+      const bucket = this.embeddedBySegment.get(key);
+      if (bucket) bucket.push(entry);
+      else this.embeddedBySegment.set(key, [entry]);
+    }
+  }
+
+  private readonly embeddedByRoot = new Map<string, { root: string; matcher: Ignore }>();
+  private readonly embeddedBySegment = new Map<string, Array<{ root: string; matcher: Ignore }>>();
+
+  /** Innermost embedded root containing `rel`, or undefined. */
+  private embeddedRootFor(rel: string): { root: string; matcher: Ignore } | undefined {
+    if (this.embeddedByRoot.size === 0) return undefined;
+    for (let i = rel.lastIndexOf('/'); i >= 0; i = rel.lastIndexOf('/', i - 1)) {
+      const hit = this.embeddedByRoot.get(rel.slice(0, i + 1));
+      if (hit) return hit;
+    }
+    return undefined;
   }
 
   ignores(rel: string): boolean {
@@ -748,18 +781,18 @@ export class ScopeIgnore {
         return false;
       }
     }
-    for (const { root, matcher } of this.embedded) {
-      if (rel.startsWith(root)) {
-        const inner = rel.slice(root.length);
-        if (inner === '') return false;
-        // Built-in defaults apply to the FULL path uniformly (#407) — an
-        // embedded repo inside node_modules (an npm git-dependency) must stay
-        // excluded even though its own rules wouldn't ignore its files.
-        return this.defaults.ignores(rel) || matcher.ignores(inner);
-      }
+    const enclosing = this.embeddedRootFor(rel);
+    if (enclosing) {
+      const inner = rel.slice(enclosing.root.length);
+      if (inner === '') return false;
+      // Built-in defaults apply to the FULL path uniformly (#407) — an
+      // embedded repo inside node_modules (an npm git-dependency) must stay
+      // excluded even though its own rules wouldn't ignore its files.
+      return this.defaults.ignores(rel) || enclosing.matcher.ignores(inner);
     }
     // Never prune a directory that leads to an embedded repo.
-    if (rel.endsWith('/') && this.embedded.some(({ root }) => root.startsWith(rel))) {
+    if (rel.endsWith('/')
+      && (this.embeddedBySegment.get(firstSegment(rel)) ?? []).some(({ root }) => root.startsWith(rel))) {
       return false;
     }
     return this.rootMatcher.ignores(rel);
