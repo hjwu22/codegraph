@@ -733,6 +733,12 @@ export class ScopeIgnore {
     private includeRoots: string[] = [],
     private defaults: Ignore = defaultsOnlyIgnore(),
   ) {
+    // Every producer emits `dir/`, and the lookup below depends on it: a root
+    // without the trailing slash can never be one of a path's `/`-terminated
+    // prefixes, so it would silently stop scoping its repo. The old linear scan
+    // failed loudly instead (`inner` came out as `/x.c`, which `ignore` rejects),
+    // so normalize here rather than trade a crash for a silent no-op.
+    embedded = [...embedded].map((e) => (e.root.endsWith('/') ? e : { ...e, root: `${e.root}/` }));
     // Longest root first so paths in nested embedded repos hit the innermost matcher.
     this.embedded = [...embedded].sort((a, b) => b.root.length - a.root.length);
     // `ignores` runs once per file AND once per watcher event, and an Android

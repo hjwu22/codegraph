@@ -528,6 +528,17 @@ describe('multi-repo workspaces (#514) + .gitignore-respect default (#970, #976)
       expect(discoverEmbeddedRepoRoots(ws)).toEqual(['art/']);
     });
 
+    it('still scopes a root supplied without its trailing slash', () => {
+      // The prefix index only ever probes `/`-terminated prefixes, so a root
+      // spelled `art` rather than `art/` would silently scope nothing. Every
+      // producer emits the slash today; this pins the constructor's normalization
+      // so a future one cannot quietly disable embedded-repo scope.
+      makeRepoWorkspace(ws, ['art']);
+      const scope = buildScopeIgnore(ws, ['art']);
+      expect(scope.ignores('art/src.c')).toBe(false);
+      expect(scope.ignores('art/gen/derived.c')).toBe(true);
+    });
+
     it('leaves a plain non-git directory alone', () => {
       write(path.join(ws, 'a.ts'), 'export const a = 1;\n'); // no .repo, no git
       expect(discoverEmbeddedRepoRoots(ws)).toEqual([]);

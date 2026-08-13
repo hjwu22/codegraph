@@ -156,7 +156,6 @@ export class AospArtifactExtractor {
     return text.split(/[\s,]+/).map((v) => v.trim()).filter(Boolean);
   }
 
-  /** Find a balanced delimiter while ignoring quoted strings and DSL comments. */
   /**
    * Line of a declaration whose regex leads with `(^|\n)\s*`.
    *
@@ -169,6 +168,7 @@ export class AospArtifactExtractor {
     return this.lineAt(match.index + Math.max(0, match[0].search(/\S/)));
   }
 
+  /** Find a balanced delimiter while ignoring quoted strings and DSL comments. */
   private balancedEnd(
     text: string,
     openOffset: number,
