@@ -23,7 +23,19 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixes
 
-- AOSP extraction now handles nested Device Tree nodes and comment apostrophes correctly; preserves unresolved-reference metadata across SQLite round trips; avoids classifying generic Maven XML as Android metadata; restores project-local compile-command fallback and root `build/`/`vendor/` scanning; and indexes Binder implementations without repeatedly rescanning every type and method. The review remediation also fixes exact XML attribute matching and VINTF line numbers, AIDL backend defaults, Android.mk `+=` handling, runtime loading of health-check-only grammars, and XML/YAML line lookup cost. Re-index after upgrading so existing AOSP graphs gain the persisted variant evidence.
+- Device Tree files now index the hardware described inside them. Peripherals nested under a parent node — which is where nearly every real `.dts` puts them — were being skipped, so searches for a device or its driver came back empty. Re-index after upgrading.
+
+- An `Android.bp` file no longer stops being indexed at its first apostrophe. A comment as ordinary as `// Clients don't need this` silently truncated the rest of the file, so most of its modules never appeared in the graph.
+
+- AIDL files no longer invent symbols out of their own comments. The word "interface" inside a doc comment or an `aidl_api` file header was being read as a declaration, which buried the real interfaces under thousands of entries named `is`, `module` and `for`.
+
+- Android symbols now report the line they are actually declared on. Blueprint modules, Bazel targets and Device Tree nodes were being reported at the blank or comment line above them, so jumping to a result landed in the wrong place.
+
+- Android SELinux and Device Tree results are no longer dominated by catch-all matches. A policy file's final `*` fallback rule was being linked to every system property, and a device was being matched to any binding that shared a generic identifier such as `arm,primecell`.
+
+- An Android `repo` checkout now respects each project's own `.gitignore`. Because such a workspace has no repository at its top level, all 1,300+ projects were treated as one undifferentiated tree and their ignore rules never applied.
+
+- Maven and other generic XML is no longer mistaken for Android test configuration, and C/C++ projects with a `compile_commands.json` keep resolving includes when a file's own compile command lists none.
 
 - C, C++, Objective-C and Rust unions are now indexed as first-class `union` nodes. A `union` declaration previously produced no symbol at all, so it never appeared in search or `codegraph_explore`, and anything attached to it disappeared with it — in Rust, every `impl SomeTrait for MyUnion` lost its edge, the methods from that impl were left pointing at a type the graph did not contain, and asking which types implement a trait quietly skipped the union ones. A union-shaped dispatch table in C now resolves its function pointers like a struct-shaped one. A `typedef union { … } Name;` in C keeps the typedef's name and is no longer mistaken for a plain type alias. Thanks @ctype-lab. Re-index after upgrading to pick up unions in existing projects. (#1515)
 
